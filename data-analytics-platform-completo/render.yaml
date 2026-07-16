@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: data-analytics-api
+    env: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: data-analytics-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: data-analytics-redis
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+
+  - type: worker
+    name: data-analytics-worker
+    env: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: celery -A app.worker.celery_app worker --loglevel=info
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: data-analytics-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: data-analytics-redis
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+
+  - type: web
+    name: data-analytics-web
+    env: docker
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile
+
+  - type: redis
+    name: data-analytics-redis
+    ipAllowList: []
+
+databases:
+  - name: data-analytics-db
+    databaseName: analytics
+    user: analytics
