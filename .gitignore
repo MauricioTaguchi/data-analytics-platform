@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+.env
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+frontend/node_modules/
+frontend/dist/
+.idea/
+.vscode/
