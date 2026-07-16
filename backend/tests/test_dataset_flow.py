@@ -1,18 +1,34 @@
 from io import BytesIO
 
+
 def test_complete_dataset_flow(client, auth_headers):
     project = client.post(
         "/api/v1/projects",
-        json={"name": "Vendas", "description": "Análise comercial"},
+        json={
+            "name": "Sales",
+            "description": "Commercial analysis",
+        },
         headers=auth_headers,
     )
     assert project.status_code == 201
     project_id = project.json()["id"]
 
-    csv_content = b"name,age,salary\nAna,30,5000\nBruno,40,7000\nBruno,40,7000\n"
+    csv_content = (
+        b"name,age,salary\n"
+        b"Ana,30,5000\n"
+        b"Bruno,40,7000\n"
+        b"Bruno,40,7000\n"
+    )
+
     upload = client.post(
         f"/api/v1/datasets/project/{project_id}",
-        files={"file": ("sample.csv", BytesIO(csv_content), "text/csv")},
+        files={
+            "file": (
+                "sample.csv",
+                BytesIO(csv_content),
+                "text/csv",
+            )
+        },
         headers=auth_headers,
     )
     assert upload.status_code == 201
@@ -29,12 +45,16 @@ def test_complete_dataset_flow(client, auth_headers):
         f"/api/v1/datasets/{dataset_id}/profile",
         headers=auth_headers,
     )
-    assert profile.status_code == 200
-    assert profile.json()["profile"]["summary"]["duplicate_rows"] == 1
+    assert profile.status_code == 202
+    assert profile.json()["status"] in {"queued", "completed"}
+    assert "task_id" in profile.json()
 
     transform = client.post(
         f"/api/v1/datasets/{dataset_id}/transform",
-        json={"operation": "drop_duplicates", "parameters": {}},
+        json={
+            "operation": "drop_duplicates",
+            "parameters": {},
+        },
         headers=auth_headers,
     )
     assert transform.status_code == 202
