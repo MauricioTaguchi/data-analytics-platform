@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: analytics_test
+          POSTGRES_USER: analytics
+          POSTGRES_PASSWORD: analytics
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U analytics -d analytics_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONPATH: .
+      DATABASE_URL: postgresql+psycopg2://analytics:analytics@localhost:5432/analytics_test
+      SECRET_KEY: ci-only-secret-key
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_EAGER: "true"
+      ENVIRONMENT: test
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: "1000"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install backend dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+      - name: Validate Alembic migrations
+        run: alembic upgrade head && alembic check
+      - name: Lint Python
+        run: ruff check app tests
+      - name: Type-check critical Python boundaries
+        run: mypy app/core app/services/storage_service.py app/schemas
+      - name: Run backend tests with coverage
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install application dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install CI-only quality tools
+        run: pnpm add --save-dev --lockfile=false @eslint/js@9.17.0 eslint@9.17.0 typescript-eslint@8.18.0 @vitest/coverage-v8@2.1.9
+      - name: Lint and type-check frontend
+        run: pnpm exec eslint src e2e && pnpm typecheck
+      - name: Run frontend tests with coverage
+        run: pnpm exec vitest run src --coverage --coverage.provider=v8 --coverage.include=src/data-utils.ts --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=70
+      - name: Build production bundle
+        run: pnpm build
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run desktop and mobile end-to-end tests
+        run: pnpm test:e2e
+
+  full-stack-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: analytics_e2e
+          POSTGRES_USER: analytics
+          POSTGRES_PASSWORD: analytics
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U analytics -d analytics_e2e"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg2://analytics:analytics@localhost:5432/analytics_e2e
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: full-stack-ci-secret
+      CELERY_EAGER: "true"
+      ENVIRONMENT: test
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: "1000"
+      CORS_ORIGINS: '["http://127.0.0.1:4173"]'
+      VITE_API_URL: http://127.0.0.1:8000/api/v1
+      E2E_LIVE_API: "true"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install backend and apply migrations
+        working-directory: backend
+        run: pip install -r requirements.txt && alembic upgrade head
+      - name: Start API
+        working-directory: backend
+        run: nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/dataflow-api.log 2>&1 &
+      - name: Wait for API readiness
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8000/health/ready > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/dataflow-api.log
+          exit 1
+      - name: Install frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run live API journey
+        working-directory: frontend
+        run: pnpm exec playwright test e2e/live-api-workflow.spec.ts --project=chromium
+      - name: Print API diagnostics after a failure
+        if: failure()
+        run: cat /tmp/dataflow-api.log
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/dependency-review-action@v4

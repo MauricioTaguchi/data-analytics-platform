@@ -1,0 +1,5 @@
+order_id,order_date,customer,product,category,total,channel,state
+100001,2024-01-02,Ana Silva,Notebook Pro,Computers,5299,Online,SP
+100002,2024-01-02,John Santos,Office Chair,Furniture,899.90,Retail,RJ
+100003,2024-01-02,Carla Lima,24-inch Monitor,Computers,699,Online,MG
+100004,2024-01-03,Lucas Rocha,Mechanical Keyboard,Accessories,,Online,SP
