@@ -1,4 +1,15 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
@@ -28,10 +39,21 @@ class Transformation(Base):
     dataset = relationship("Dataset", back_populates="transformations")
 
     __table_args__ = (
+        CheckConstraint("expected_version >= 1", name="ck_transformations_expected_version_positive"),
+        CheckConstraint(
+            "before_rows >= 0 AND after_rows >= 0 AND before_columns >= 0 AND after_columns >= 0",
+            name="ck_transformations_dimensions_nonnegative",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'failed', 'undone', 'cancelled')",
+            name="ck_transformations_status",
+        ),
         UniqueConstraint(
             "dataset_id",
             "user_id",
             "idempotency_key",
             name="uq_transformation_idempotency",
         ),
+        Index("ix_transformations_dataset_created_at", "dataset_id", "created_at"),
+        Index("ix_transformations_status_created_at", "status", "created_at"),
     )

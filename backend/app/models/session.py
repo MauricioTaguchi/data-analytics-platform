@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.sql import func
 from app.db.base import Base
 
@@ -12,3 +12,5 @@ class RefreshSession(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (Index("ix_refresh_sessions_expires_at", "expires_at", "id"),)

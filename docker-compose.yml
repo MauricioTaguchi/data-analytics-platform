@@ -1,52 +1,80 @@
 services:
+  migrate:
+    build: ./backend
+    container_name: analytics-migrate
+    init: true
+    restart: "no"
+    env_file: [./backend/.env]
+    depends_on:
+      db: { condition: service_healthy }
+    command: alembic upgrade head
+
   api:
     build: ./backend
     container_name: analytics-api
+    init: true
+    restart: unless-stopped
     env_file: [./backend/.env]
     ports: ["8000:8000"]
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     volumes:
-      - ./backend:/app
       - analytics_uploads:/app/data/uploads
       - analytics_reports:/app/data/reports
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 20s
+    stop_grace_period: 30s
 
   worker:
     build: ./backend
     container_name: analytics-worker
+    init: true
+    restart: unless-stopped
     env_file: [./backend/.env]
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     volumes:
-      - ./backend:/app
       - analytics_uploads:/app/data/uploads
       - analytics_reports:/app/data/reports
     command: celery -A app.worker.celery_app worker --loglevel=info
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 60s
 
   scheduler:
     build: ./backend
     container_name: analytics-scheduler
+    init: true
+    restart: unless-stopped
     env_file: [./backend/.env]
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     volumes:
-      - ./backend:/app
       - analytics_uploads:/app/data/uploads
       - analytics_reports:/app/data/reports
     command: celery -A app.worker.celery_app beat --loglevel=info
+    stop_grace_period: 30s
 
   web:
     build: ./frontend
     container_name: analytics-web
+    init: true
+    restart: unless-stopped
     ports: ["5173:80"]
     depends_on:
       api: { condition: service_healthy }
@@ -54,22 +82,27 @@ services:
   db:
     image: postgres:16-alpine
     container_name: analytics-db
+    restart: unless-stopped
     environment:
       POSTGRES_DB: analytics
       POSTGRES_USER: analytics
       POSTGRES_PASSWORD: analytics
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
     container_name: analytics-redis
-    ports: ["6379:6379"]
+    restart: unless-stopped
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redis_data:/data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -78,5 +111,6 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   analytics_uploads:
   analytics_reports:

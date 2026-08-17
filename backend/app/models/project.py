@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
@@ -14,3 +14,5 @@ class Project(Base):
 
     owner = relationship("User", back_populates="projects")
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
+
+    __table_args__ = (Index("ix_projects_owner_created_at", "owner_id", "created_at"),)

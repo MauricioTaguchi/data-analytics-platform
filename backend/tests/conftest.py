@@ -4,6 +4,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("CELERY_EAGER", "true")
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("AUTH_RATE_LIMIT_MAX_ATTEMPTS", "1000")
+os.environ.setdefault("UPLOAD_RATE_LIMIT_MAX_ATTEMPTS", "1000")
 
 import pytest
 from fastapi.testclient import TestClient

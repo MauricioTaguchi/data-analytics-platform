@@ -1,10 +1,15 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, develop]
   pull_request:
     branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,6 +17,7 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -41,43 +47,48 @@ jobs:
       ENVIRONMENT: test
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: "1000"
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - name: Install backend dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
       - name: Validate Alembic migrations
-        run: alembic upgrade head && alembic check
+        run: python -m alembic upgrade head && python -m alembic check
       - name: Lint Python
-        run: ruff check app tests
+        run: python -m ruff check app tests
       - name: Type-check critical Python boundaries
-        run: mypy app/core app/services/storage_service.py app/schemas
+        run: python -m mypy app/core app/services/storage_service.py app/schemas
       - name: Run backend tests with coverage
-        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+        run: python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
       - name: Audit Python dependencies
-        run: pip-audit -r requirements.txt
+        run: python -m pip_audit -r requirements.txt
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 11.19.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install application dependencies
         run: pnpm install --frozen-lockfile
-      - name: Install CI-only quality tools
+      - name: Install pinned CI-only quality tools
         run: pnpm add --save-dev --lockfile=false @eslint/js@9.17.0 eslint@9.17.0 typescript-eslint@8.18.0 @vitest/coverage-v8@2.1.9
       - name: Lint and type-check frontend
         run: pnpm exec eslint src e2e && pnpm typecheck
@@ -92,6 +103,7 @@ jobs:
 
   full-stack-e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16-alpine
@@ -120,23 +132,25 @@ jobs:
       VITE_API_URL: http://127.0.0.1:8000/api/v1
       E2E_LIVE_API: "true"
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 11.19.0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/requirements.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install backend and apply migrations
         working-directory: backend
-        run: pip install -r requirements.txt && alembic upgrade head
+        run: python -m pip install -r requirements.txt && python -m alembic upgrade head
       - name: Start API
         working-directory: backend
         run: nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/dataflow-api.log 2>&1 &
@@ -166,8 +180,11 @@ jobs:
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0

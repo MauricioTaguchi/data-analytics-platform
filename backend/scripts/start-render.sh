@@ -14,4 +14,13 @@ shutdown() {
 }
 
 trap shutdown INT TERM EXIT
-wait "$api_pid"
+
+# Keep the service healthy only while every required process is alive. Render
+# restarts the container if the API, worker, or scheduler exits unexpectedly.
+while kill -0 "$api_pid" 2>/dev/null \
+  && kill -0 "$worker_pid" 2>/dev/null \
+  && kill -0 "$scheduler_pid" 2>/dev/null; do
+  sleep 2
+done
+
+exit 1

@@ -1,0 +1,7 @@
+# Default ownership. GitHub branch protection must require code-owner review to enforce it.
+* @MauricioTaguchi
+
+/.github/ @MauricioTaguchi
+/docs/ @MauricioTaguchi
+/backend/alembic/ @MauricioTaguchi
+/render.yaml @MauricioTaguchi

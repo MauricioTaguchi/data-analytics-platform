@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { checkApiHealth, describeApiError, downloadDataset, type AuthenticationInput } from "./api-client";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
@@ -10,7 +10,7 @@ import { TransformationBuilder } from "./components/TransformationBuilder";
 import { WorkspaceSidebar, type WorkspaceSection } from "./components/WorkspaceSidebar";
 import { useAuthentication } from "./hooks/useAuthentication";
 import { useDatasetUpload } from "./hooks/useDatasetUpload";
-import { useProfilingJob } from "./hooks/useProfilingJob";
+import { isTerminalJobStatus, useProfilingJob } from "./hooks/useProfilingJob";
 import { useTransformations } from "./hooks/useTransformations";
 
 const TOUR_STEPS = [
@@ -41,14 +41,27 @@ export function App() {
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("overview");
   const [notice, setNotice] = useState("The portfolio sample is ready. Connect the API to enable persistent workflows.");
   const [busy, setBusy] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [tourStep, setTourStep] = useState<number | null>(0);
   const [apiStatus, setApiStatus] = useState("not checked");
-  const combinedBusy = busy || auth.busy;
-  const progress = useMemo(() => jobs.jobs.find((job) => !new Set(["SUCCESS", "FAILURE", "REVOKED"]).has(job.status))?.progress ?? 100, [jobs.jobs]);
+  const lifecycleOperation = useRef(false);
+  const combinedBusy = busy || lifecycleBusy || auth.busy;
+  const progress = jobs.jobs.find((job) => !isTerminalJobStatus(job.status))?.progress
+    ?? (workspace.uploadPhase === "uploading" ? workspace.uploadProgress : 100);
+  const uploadLabel = workspace.uploadPhase === "uploading"
+    ? `Uploading ${workspace.uploadProgress}%`
+    : combinedBusy ? "Processing…" : "Upload dataset";
 
-  useEffect(() => { if (workspace.dataset) void transformations.loadHistory(); }, [workspace.dataset?.id]);
+  useEffect(() => {
+    if (auth.sessionExpiredAt === null) return;
+    jobs.reset();
+    workspace.reset();
+    transformations.reset();
+    setBusy(false);
+    setNotice("Your session expired. Server-backed data was cleared from this browser; reconnect to continue.");
+  }, [auth.sessionExpiredAt, jobs.reset, transformations.reset, workspace.reset]);
 
   async function connect(input: AuthenticationInput) {
     try {
@@ -57,8 +70,44 @@ export function App() {
     } catch (error) { setNotice(describeApiError(error)); }
   }
 
+  async function runLifecycleOperation(operation: () => Promise<void>) {
+    if (lifecycleOperation.current) return;
+    lifecycleOperation.current = true;
+    setLifecycleBusy(true);
+    try {
+      await operation();
+    } finally {
+      lifecycleOperation.current = false;
+      setLifecycleBusy(false);
+    }
+  }
+
+  async function cancelActiveWorkflows() {
+    const uploadTaskId = await workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options));
+    await Promise.allSettled(jobs.jobs
+      .filter((job) => job.task_id !== uploadTaskId && !isTerminalJobStatus(job.status))
+      .map((job) => jobs.cancel(job.task_id)));
+  }
+
   async function disconnect() {
-    await auth.disconnect(); workspace.reset(); transformations.reset(); setNotice("The server session was revoked and the local demo was restored.");
+    await runLifecycleOperation(async () => {
+      await cancelActiveWorkflows();
+      jobs.reset();
+      workspace.reset();
+      transformations.reset();
+      await auth.disconnect();
+      setNotice("The server session was revoked, active work was cancelled, and the local demo was restored.");
+    });
+  }
+
+  async function restoreSample() {
+    await runLifecycleOperation(async () => {
+      await cancelActiveWorkflows();
+      jobs.reset();
+      workspace.reset();
+      transformations.reset();
+      setNotice("The portfolio sample was restored.");
+    });
   }
 
   async function upload(file?: File) {
@@ -104,16 +153,16 @@ export function App() {
 
   const content = activeSection === "datasets" ? <DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} />
     : activeSection === "transformations" ? <div className="work-grid"><TransformationBuilder live={auth.live} busy={combinedBusy} columns={workspace.columns} operation={transformations.operation} column={transformations.column} value={transformations.value} preview={transformations.preview} onOperation={transformations.setOperation} onColumn={transformations.setColumn} onValue={transformations.setValue} onPreview={previewTransformation} onApply={applyTransformation} /><LineageTimeline history={transformations.history} sourceName={workspace.datasetName} live={auth.live} canUndo={auth.live ? transformations.history.some((item) => item.status === "completed" && !item.undone_at) : transformations.localSnapshots.length > 0} busy={combinedBusy} onUndo={undoTransformation} /></div>
-    : activeSection === "dashboards" ? <DashboardWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} rows={workspace.rows} columns={workspace.columns} onNotice={setNotice} />
-    : activeSection === "reports" ? <ReportsWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} datasetName={workspace.datasetName} rows={workspace.dataset?.row_count || workspace.rows.length} columns={workspace.dataset?.column_count || workspace.columns.length} onNotice={setNotice} onTrack={jobs.track} />
-    : activeSection === "monitoring" ? <OperationsMonitor jobs={jobs.jobs} live={auth.live} apiStatus={apiStatus} onCancel={(taskId) => void jobs.cancel(taskId).then(() => setNotice("The job was cancelled."), (error) => setNotice(describeApiError(error)))} />
+    : activeSection === "dashboards" ? <DashboardWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} rows={workspace.rows} columns={workspace.columns} externalBusy={combinedBusy} onNotice={setNotice} onBusyChange={setBusy} />
+    : activeSection === "reports" ? <ReportsWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} datasetName={workspace.datasetName} rows={workspace.dataset?.row_count || workspace.rows.length} columns={workspace.dataset?.column_count || workspace.columns.length} externalBusy={combinedBusy} onNotice={setNotice} onTrack={jobs.track} onBusyChange={setBusy} />
+    : activeSection === "monitoring" ? <OperationsMonitor jobs={jobs.jobs} live={auth.live} apiStatus={apiStatus} onResume={(taskId) => void jobs.resume(taskId).then(() => setNotice("Monitoring resumed and the job completed."), (error) => setNotice(describeApiError(error)))} onCancel={(taskId) => void jobs.cancel(taskId).then(() => setNotice("Cancellation requested. The worker will stop at the next safe checkpoint."), (error) => setNotice(describeApiError(error)))} />
     : <><section className="metric-grid hero-metrics"><div><span>Dataset rows</span><strong>{(workspace.dataset?.row_count || workspace.rows.length).toLocaleString("en-US")}</strong><small>Current governed version</small></div><div><span>Columns</span><strong>{workspace.dataset?.column_count || workspace.columns.length}</strong><small>Profiled attributes</small></div><div><span>Transformations</span><strong>{transformations.history.length}</strong><small>Auditable lineage events</small></div><div><span>Worker jobs</span><strong>{jobs.jobs.length}</strong><small>Tracked background tasks</small></div></section><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} /></>;
 
   return <div className="app-shell">
     <WorkspaceSidebar activeSection={activeSection} mobileOpen={mobileNav} live={auth.live} busy={combinedBusy} onNavigate={setActiveSection} onCloseMobile={() => setMobileNav(false)} onCheckApi={checkHealth} onConnect={() => setConnectionOpen(true)} onDisconnect={() => void disconnect()} />
-    <main className="workspace"><header className="topbar"><button className="menu-button" onClick={() => setMobileNav((value) => !value)} aria-label="Open menu">☰</button><div className="breadcrumbs">DataFlow <span>›</span> {SECTION_COPY[activeSection].title}</div><div className="top-actions"><button className="secondary" onClick={() => { workspace.reset(); transformations.reset(); setNotice("The portfolio sample was restored."); }}>Use sample</button><label className="primary file-button">{combinedBusy ? "Processing…" : "Upload dataset"}<input type="file" accept=".csv,.xlsx,.xls,.json,.parquet" onChange={(event) => upload(event.target.files?.[0])} /></label></div></header>
+    <main className="workspace"><header className="topbar"><button className="menu-button" onClick={() => setMobileNav((value) => !value)} aria-label="Open menu">☰</button><div className="breadcrumbs">DataFlow <span>›</span> {SECTION_COPY[activeSection].title}</div><div className="top-actions"><button className="secondary" disabled={combinedBusy} onClick={() => void restoreSample()}>Use sample</button>{workspace.uploadPhase !== "idle" ? <button className="secondary" onClick={() => void workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options)).then((cancelled) => { if (cancelled) setNotice("Cancelling the active workflow…"); })}>Cancel workflow</button> : null}<label className={`primary file-button${combinedBusy ? " disabled" : ""}`} aria-disabled={combinedBusy}>{uploadLabel}<input type="file" accept=".csv,.xlsx,.xls,.json,.parquet" disabled={combinedBusy} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void upload(file); }} /></label></div></header>
       <section className="dataset-heading"><div><div className="title-line"><h1>{SECTION_COPY[activeSection].title}</h1><span className={auth.live ? "connected" : "connected demo"}>{auth.live ? "Live API" : "Demo mode"}</span></div><p>{SECTION_COPY[activeSection].subtitle}</p></div><button className="secondary tour-trigger" onClick={() => setTourStep(0)}>Guided tour</button></section>
-      <div className="notice" role="status"><span>i</span>{notice}</div>{content}
+      <div className="notice" role="status" aria-live="polite"><span>i</span>{notice}</div>{content}
       <footer className="workspace-footer"><div><span className="success-dot" />{auth.live ? "Authenticated, refreshable, revocable session" : "Local mode without persistence"}</div><div><button className="primary" onClick={exportDataset}>Export current version</button></div></footer>
     </main>
     {connectionOpen ? <ConnectionPanel busy={auth.busy} onClose={() => setConnectionOpen(false)} onSubmit={connect} /> : null}

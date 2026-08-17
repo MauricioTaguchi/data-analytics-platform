@@ -12,6 +12,8 @@ celery_app = Celery(
         "app.tasks.dataset_tasks",
         "app.tasks.report_tasks",
         "app.tasks.maintenance_tasks",
+        "app.tasks.outbox_tasks",
+        "app.tasks.retention_tasks",
     ],
 )
 
@@ -27,12 +29,28 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     task_always_eager=settings.CELERY_EAGER,
     task_store_eager_result=settings.CELERY_EAGER,
+    task_ignore_result=not settings.CELERY_EAGER,
+    task_store_errors_even_if_ignored=False,
+    result_expires=3_600,
     worker_max_memory_per_child=settings.CELERY_WORKER_MAX_MEMORY_KB,
     worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS,
+    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
     beat_schedule={
         "remove-orphaned-storage-files": {
             "task": "storage.remove_orphans",
             "schedule": 3_600.0,
+        },
+        "remove-expired-refresh-sessions": {
+            "task": "auth.remove_expired_refresh_sessions",
+            "schedule": 3_600.0,
+        },
+        "dispatch-pending-jobs": {
+            "task": "jobs.dispatch_pending",
+            "schedule": 10.0,
+        },
+        "remove-expired-job-history": {
+            "task": "jobs.remove_expired_history",
+            "schedule": 86_400.0,
         },
     },
 )

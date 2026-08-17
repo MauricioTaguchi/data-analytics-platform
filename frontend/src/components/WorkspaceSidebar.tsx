@@ -10,7 +10,7 @@ export function WorkspaceSidebar(props: Props) {
     <button className="brand" onClick={() => navigate("overview")} aria-label="Go to overview"><span className="brand-mark">⌁</span><span>DataFlow</span></button>
     <nav aria-label="Primary navigation">{NAV_ITEMS.map(([section, label, number]) => <button key={section} className={props.activeSection === section ? "nav-item active" : "nav-item"} onClick={() => navigate(section)}><span>{number}</span>{label}</button>)}</nav>
     <div className="sidebar-footer"><span>Environment</span><strong>{props.live ? "Authenticated API" : "Local demo"}</strong>
-      <button onClick={props.live ? props.onDisconnect : props.onConnect}>{props.live ? "Sign out" : "Connect API"}</button>
-      <button onClick={props.onCheckApi}>{props.busy ? "Checking…" : "Check health"}</button></div>
+      <button disabled={props.busy} onClick={props.live ? props.onDisconnect : props.onConnect}>{props.live ? "Sign out" : "Connect API"}</button>
+      <button disabled={props.busy} onClick={props.onCheckApi}>{props.busy ? "Working…" : "Check health"}</button></div>
   </aside>;
 }

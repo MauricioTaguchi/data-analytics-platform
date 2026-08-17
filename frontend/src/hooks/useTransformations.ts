@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { applyDatasetTransformation, fetchTransformationHistory, previewDatasetTransformation, undoDatasetTransformation, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
+import { useCallback, useEffect, useState } from "react";
+import { applyDatasetTransformation, fetchTransformationHistory, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, undoDatasetTransformation, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
 import { applyLocalOperation, buildApiParameters, type DataOperation, type DataRow } from "../data-utils";
 
 type TrackJob = (taskId: string, label: string) => Promise<JobStatus>;
@@ -13,16 +13,34 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   const [localSnapshots, setLocalSnapshots] = useState<DataRow[][]>([]);
   const columns = Object.keys(rows[0] || {});
   const activeColumn = columns.includes(column) ? column : columns[0] || "";
+  const datasetId = dataset?.id ?? null;
 
-  async function loadHistory() {
-    if (!dataset) { setHistory([]); return; }
-    setHistory(await fetchTransformationHistory(dataset.id));
-  }
+  const loadHistory = useCallback(async (signal?: AbortSignal) => {
+    if (!datasetId) { setHistory([]); return; }
+    setHistory(await fetchTransformationHistory(datasetId, signal));
+  }, [datasetId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadHistory(controller.signal).catch((error) => {
+      if (!isRequestCancelled(error)) setHistory([]);
+    });
+    return () => controller.abort();
+  }, [loadHistory]);
 
   async function previewOperation() {
     if (dataset) {
-      const queued = await previewDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version);
-      const completed = await track(queued.task_id, "Transformation preview");
+      const taskId = crypto.randomUUID();
+      let trackingId: string = taskId;
+      try {
+        const queued = await previewDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
+        trackingId = queued.task_id;
+      } catch (error) {
+        if (!isAmbiguousJobCreationError(error)) throw error;
+        const recovered = await reconcileCreatedJob(taskId);
+        if (!recovered) throw error;
+      }
+      const completed = await track(trackingId, "Transformation preview");
       const result = completed.result as unknown as TransformationPreview;
       if (!result?.before || !result?.after) throw new Error("The transformation preview returned an invalid result.");
       setPreview(result); return result;
@@ -34,8 +52,17 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
 
   async function applyOperation() {
     if (dataset) {
-      const queued = await applyDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version);
-      await track(queued.task_id, "Dataset transformation");
+      const taskId = crypto.randomUUID();
+      let trackingId: string = taskId;
+      try {
+        const queued = await applyDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
+        trackingId = queued.task_id;
+      } catch (error) {
+        if (!isAmbiguousJobCreationError(error)) throw error;
+        const recovered = await reconcileCreatedJob(taskId);
+        if (!recovered) throw error;
+      }
+      await track(trackingId, "Dataset transformation");
       await refresh(); await loadHistory(); setPreview(null); return;
     }
     const nextRows = applyLocalOperation(rows, operation, { column: activeColumn, value });
@@ -59,11 +86,11 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
     }
   }
 
-  function reset() {
+  const reset = useCallback(() => {
     setPreview(null);
     setHistory([]);
     setLocalSnapshots([]);
-  }
+  }, []);
 
   return { operation, setOperation, column: activeColumn, setColumn, value, setValue, preview, history, localSnapshots, previewOperation, applyOperation, undo, loadHistory, reset };
 }
