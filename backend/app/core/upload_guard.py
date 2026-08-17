@@ -100,7 +100,10 @@ def _access_subject(scope: Scope) -> int | None:
         )
         if payload.get("type", "access") != "access":
             return None
-        subject = int(payload.get("sub"))
+        subject_claim = payload.get("sub")
+        if subject_claim is None:
+            return None
+        subject = int(subject_claim)
         return subject if subject > 0 else None
     except (InvalidTokenError, TypeError, ValueError):
         return None

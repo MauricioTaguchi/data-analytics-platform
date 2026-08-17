@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient, authenticate, cancelJob, createChart, createDashboard, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile } from "./api-client";
+import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile } from "./api-client";
 
 const originalAdapter = apiClient.defaults.adapter;
 
@@ -20,6 +20,17 @@ afterEach(async () => {
 });
 
 describe("API session client", () => {
+  it("uses the production API only for the explicitly trusted web host", () => {
+    expect(defaultApiUrlForHostname("data-analytics-web.onrender.com"))
+      .toBe("https://data-analytics-api.onrender.com/api/v1");
+    expect(defaultApiUrlForHostname("DATA-ANALYTICS-WEB.ONRENDER.COM."))
+      .toBe("https://data-analytics-api.onrender.com/api/v1");
+    expect(defaultApiUrlForHostname("attackerdata-analytics-web.onrender.com"))
+      .toBe("http://localhost:8000/api/v1");
+    expect(defaultApiUrlForHostname("data-analytics-web.onrender.com.attacker.example"))
+      .toBe("http://localhost:8000/api/v1");
+  });
+
   it("forwards cancellation to dashboard and chart mutations", async () => {
     const controller = new AbortController();
     const observedSignals: Array<AbortSignal | undefined> = [];

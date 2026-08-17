@@ -3,10 +3,17 @@ import axios, { type InternalAxiosRequestConfig } from "axios";
 import type { DataOperation, DataRow } from "./data-utils";
 
 
+const LOCAL_API_URL = "http://localhost:8000/api/v1";
+const PRODUCTION_API_URL = "https://data-analytics-api.onrender.com/api/v1";
+const PRODUCTION_WEB_HOST = "data-analytics-web.onrender.com";
+
+export function defaultApiUrlForHostname(hostname: string): string {
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, "");
+  return normalizedHostname === PRODUCTION_WEB_HOST ? PRODUCTION_API_URL : LOCAL_API_URL;
+}
+
 const hostname = typeof window === "undefined" ? "" : window.location.hostname;
-const deployedApi = hostname.endsWith("onrender.com")
-  ? "https://data-analytics-api.onrender.com/api/v1"
-  : "http://localhost:8000/api/v1";
+const deployedApi = defaultApiUrlForHostname(hostname);
 
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || deployedApi,

@@ -80,7 +80,7 @@ export function useDatasetUpload() {
       activeTaskId.current = importTaskId;
       activeTaskLabel.current = "Dataset import";
       let importDatasetId: number | null = null;
-      let importTrackingId = importTaskId;
+      let importTrackingId: string = importTaskId;
       try {
         const queued = await uploadDataset(projectId, file, {
           taskId: importTaskId,
@@ -106,7 +106,7 @@ export function useDatasetUpload() {
       const profileTaskId = crypto.randomUUID();
       activeTaskId.current = profileTaskId;
       activeTaskLabel.current = "Dataset profiling";
-      let profileTrackingId = profileTaskId;
+      let profileTrackingId: string = profileTaskId;
       try {
         const profile = await startDatasetProfile(current.id, profileTaskId, controller.signal);
         profileTrackingId = profile.task_id;

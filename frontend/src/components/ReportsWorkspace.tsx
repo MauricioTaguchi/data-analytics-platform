@@ -31,7 +31,7 @@ export function ReportsWorkspace({ live, projectId, datasetId, datasetName, rows
     onBusyChange(true);
     try {
       const taskId = crypto.randomUUID();
-      let trackingId = taskId;
+      let trackingId: string = taskId;
       let reportId: number | null = null;
       try {
         const queued = await createReport(projectId, datasetId, taskId);

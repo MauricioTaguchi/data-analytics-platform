@@ -31,7 +31,7 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   async function previewOperation() {
     if (dataset) {
       const taskId = crypto.randomUUID();
-      let trackingId = taskId;
+      let trackingId: string = taskId;
       try {
         const queued = await previewDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
         trackingId = queued.task_id;
@@ -53,7 +53,7 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   async function applyOperation() {
     if (dataset) {
       const taskId = crypto.randomUUID();
-      let trackingId = taskId;
+      let trackingId: string = taskId;
       try {
         const queued = await applyDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
         trackingId = queued.task_id;
