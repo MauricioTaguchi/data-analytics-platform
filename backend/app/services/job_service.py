@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from math import ceil
+from typing import cast
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -262,7 +263,9 @@ class JobService:
         if existing.status in CANCELLATION_JOB_STATUSES:
             raise JobCancellationRequested("Job cancellation was requested.")
         if existing.status == "STARTED":
-            current_lease = _normalized(existing.lease_expires_at)
+            current_lease = _normalized(
+                cast(datetime | None, existing.lease_expires_at)
+            )
             remaining = lease_seconds
             if current_lease is not None:
                 remaining = min(

@@ -36,7 +36,12 @@ class LocalStorage:
             )
 
     def ensure_capacity(self, required_bytes: int = 0) -> None:
-        self.ensure_path_capacity(self.root, required_bytes)
+        minimum_free_bytes = settings.MIN_FREE_DISK_SPACE_MB * 1024 * 1024
+        self.root.mkdir(parents=True, exist_ok=True)
+        if self.available_bytes() - max(0, required_bytes) < minimum_free_bytes:
+            raise StorageCapacityError(
+                "The operation cannot be accepted because local storage is low on space."
+            )
 
     async def stage_upload(
         self,

@@ -390,7 +390,7 @@ def test_import_cancellation_handler_mutates_only_for_the_owner_attempt(
         args=[dataset_id],
         task_id=task_id,
         throw=True,
-    ).get()
+    ).result
     assert stale_result["status"] == "superseded"
 
     db = SessionLocal()
@@ -412,7 +412,7 @@ def test_import_cancellation_handler_mutates_only_for_the_owner_attempt(
         args=[dataset_id],
         task_id=task_id,
         throw=True,
-    ).get()
+    ).result
     assert owner_result["status"] == "cancelled"
 
     db = SessionLocal()
@@ -548,6 +548,7 @@ def test_expired_cancellations_reconcile_each_domain_kind(tmp_path, monkeypatch)
         report_job = JobService.get(db, "cancelled-report")
         assert report_job is not None
         report_job.report_id = report.id
+        db.flush()
 
         for task_id in (
             "cancelled-profile",

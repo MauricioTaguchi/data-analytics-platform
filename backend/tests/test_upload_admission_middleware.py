@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from starlette.responses import JSONResponse
+from starlette.types import Message, Send
 
 from app.core import upload_guard
 from app.core.cache import CacheService
@@ -57,6 +58,13 @@ def response_details(messages):
     return status, headers, json.loads(body)
 
 
+def collect_messages(messages: list[Message]) -> Send:
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    return send
+
+
 def test_declared_size_is_rejected_without_reading_the_body(monkeypatch):
     downstream_calls = []
     receive_calls = []
@@ -78,7 +86,7 @@ def test_declared_size_is_rejected_without_reading_the_body(monkeypatch):
     middleware = UploadAdmissionMiddleware(downstream)
     scope = upload_scope(headers=[(b"content-length", b"9")])
 
-    asyncio.run(middleware(scope, receive, messages.append))
+    asyncio.run(middleware(scope, receive, collect_messages(messages)))
 
     status, _headers, body = response_details(messages)
     assert status == 413
@@ -114,7 +122,9 @@ def test_streamed_size_is_rejected_before_the_excess_chunk_reaches_parser(
     monkeypatch.setattr(CacheService, "increment", lambda *_args: 1)
     middleware = UploadAdmissionMiddleware(downstream)
 
-    asyncio.run(middleware(upload_scope(), receive, messages.append))
+    asyncio.run(
+        middleware(upload_scope(), receive, collect_messages(messages))
+    )
 
     status, _headers, _body = response_details(messages)
     assert status == 413
@@ -142,7 +152,7 @@ def test_upload_rate_limit_rejects_before_body_receive(monkeypatch):
         UploadAdmissionMiddleware(downstream)(
             upload_scope(),
             receive,
-            messages.append,
+            collect_messages(messages),
         )
     )
 
@@ -173,7 +183,7 @@ def test_upload_cache_failure_returns_503_without_receiving_body(monkeypatch):
         UploadAdmissionMiddleware(downstream)(
             upload_scope(),
             receive,
-            messages.append,
+            collect_messages(messages),
         )
     )
 
@@ -211,7 +221,11 @@ def test_valid_token_job_cap_is_prechecked_without_receiving_body(monkeypatch):
     )
 
     asyncio.run(
-        UploadAdmissionMiddleware(downstream)(scope, receive, messages.append)
+        UploadAdmissionMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, body = response_details(messages)
@@ -243,7 +257,11 @@ def test_job_precheck_failure_returns_503_without_receiving_body(monkeypatch):
     )
 
     asyncio.run(
-        UploadAdmissionMiddleware(downstream)(scope, receive, messages.append)
+        UploadAdmissionMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, body = response_details(messages)
@@ -271,10 +289,18 @@ def test_upload_concurrency_cap_is_process_local_and_nonblocking(monkeypatch):
         first_messages = []
         second_messages = []
         first = asyncio.create_task(
-            middleware(upload_scope(), receive, first_messages.append)
+            middleware(
+                upload_scope(),
+                receive,
+                collect_messages(first_messages),
+            )
         )
         await entered.wait()
-        await middleware(upload_scope(), receive, second_messages.append)
+        await middleware(
+            upload_scope(),
+            receive,
+            collect_messages(second_messages),
+        )
         release.set()
         await first
         return first_messages, second_messages
@@ -356,7 +382,11 @@ def test_general_body_limit_rejects_declared_size_before_receive(monkeypatch):
     )
 
     asyncio.run(
-        RequestBodyLimitMiddleware(downstream)(scope, receive, messages.append)
+        RequestBodyLimitMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, body = response_details(messages)
@@ -391,7 +421,11 @@ def test_general_body_limit_counts_chunked_body_before_parser(monkeypatch):
     scope = upload_scope(path="/api/v1/auth/login")
 
     asyncio.run(
-        RequestBodyLimitMiddleware(downstream)(scope, receive, messages.append)
+        RequestBodyLimitMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, _body = response_details(messages)
@@ -418,7 +452,11 @@ def test_general_body_limit_ignores_methods_without_request_bodies(monkeypatch):
     )
 
     asyncio.run(
-        RequestBodyLimitMiddleware(downstream)(scope, receive, messages.append)
+        RequestBodyLimitMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, _body = response_details(messages)
@@ -441,7 +479,11 @@ def test_general_body_limit_preserves_upload_specific_limit(monkeypatch):
     scope = upload_scope(headers=[(b"content-length", b"9")])
 
     asyncio.run(
-        RequestBodyLimitMiddleware(downstream)(scope, receive, messages.append)
+        RequestBodyLimitMiddleware(downstream)(
+            scope,
+            receive,
+            collect_messages(messages),
+        )
     )
 
     status, _headers, _body = response_details(messages)
