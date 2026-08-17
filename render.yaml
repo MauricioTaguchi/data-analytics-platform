@@ -1,10 +1,11 @@
 services:
   - type: web
     name: data-analytics-api
-    env: docker
+    runtime: docker
     rootDir: backend
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
     dockerCommand: /bin/sh scripts/start-render.sh
     disk:
       name: dataflow-storage
@@ -35,10 +36,11 @@ services:
 
   - type: web
     name: data-analytics-web
-    env: docker
+    runtime: docker
     rootDir: frontend
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
     envVars:
       - key: VITE_API_URL
         value: https://data-analytics-api.onrender.com/api/v1
@@ -46,8 +48,11 @@ services:
   - type: redis
     name: data-analytics-redis
     ipAllowList: []
+    maxmemoryPolicy: noeviction
 
 databases:
   - name: data-analytics-db
+    postgresMajorVersion: "16"
     databaseName: analytics
     user: analytics
+    ipAllowList: []

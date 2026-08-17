@@ -8,12 +8,22 @@ from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
+def validate_bcrypt_password_length(password: str) -> str:
+    if len(password.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError("Password must not exceed 72 UTF-8 bytes.")
+    return password
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return pwd_context.hash(validate_bcrypt_password_length(password))
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
-    return pwd_context.verify(plain_password, password_hash)
+    return pwd_context.verify(
+        validate_bcrypt_password_length(plain_password),
+        password_hash,
+    )
 
 def _create_token(subject: str, token_type: str, expires_delta: timedelta, jti: str | None = None) -> str:
     expires_at = datetime.now(timezone.utc) + expires_delta

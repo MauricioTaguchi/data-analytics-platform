@@ -33,5 +33,5 @@ liveTest("authenticated workflow reaches dashboard and PDF report", async ({ pag
   await expect(page.getByRole("button", { name: "Download" }).first()).toBeEnabled();
 
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByText("The server session was revoked and the local demo was restored.")).toBeVisible();
+  await expect(page.getByText("The server session was revoked, active work was cancelled, and the local demo was restored.")).toBeVisible();
 });

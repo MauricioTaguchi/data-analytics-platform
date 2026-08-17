@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate semantic version tag
+        shell: bash
+        run: |
+          semver_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $semver_pattern ]]; then
+            echo "Expected a SemVer tag such as v1.2.3, v1.2.3-rc.1, or v1.2.3+build.4."
+            exit 1
+          fi
+
+          version_without_build="${GITHUB_REF_NAME%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            prerelease="${version_without_build#*-}"
+            IFS='.' read -ra identifiers <<< "$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != "0" && "$identifier" == 0* ]]; then
+                echo "Numeric pre-release identifiers must not contain leading zeroes."
+                exit 1
+              fi
+            done
+          fi
+      - name: Require the tagged commit on main
+        shell: bash
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Require successful CI and CodeQL runs for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          require_successful_workflow() {
+            workflow="$1"
+            label="$2"
+            run_state="$(
+              gh run list \
+                --repo "$REPOSITORY" \
+                --workflow "$workflow" \
+                --branch main \
+                --commit "$GITHUB_SHA" \
+                --event push \
+                --limit 1 \
+                --json conclusion,status \
+                --jq 'if length == 1 then .[0].status + ":" + (.[0].conclusion // "") else "missing" end'
+            )"
+            if [[ "$run_state" != "completed:success" ]]; then
+              echo "The latest $label push run for $GITHUB_SHA is not successful (state: $run_state)."
+              echo "Wait for the main-branch checks to pass, then rerun this release workflow."
+              exit 1
+            fi
+          }
+
+          require_successful_workflow ci.yml CI
+          require_successful_workflow codeql.yml CodeQL
+
+  backend-quality:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: analytics_release
+          POSTGRES_USER: analytics
+          POSTGRES_PASSWORD: analytics
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U analytics -d analytics_release"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONPATH: .
+      DATABASE_URL: postgresql+psycopg2://analytics:analytics@localhost:5432/analytics_release
+      SECRET_KEY: release-validation-only-secret
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_EAGER: "true"
+      ENVIRONMENT: test
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: "1000"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Validate migrations and backend quality
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
+          python -m ruff check app tests
+          python -m mypy app/core app/services/storage_service.py app/schemas
+          python -m pytest --cov=app --cov-fail-under=70
+          python -m pip_audit -r requirements.txt
+
+  frontend-quality:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install pinned CI-only quality tools
+        run: pnpm add --save-dev --lockfile=false @eslint/js@9.17.0 eslint@9.17.0 typescript-eslint@8.18.0 @vitest/coverage-v8@2.1.9
+      - name: Validate and build frontend
+        run: |
+          pnpm exec eslint src e2e
+          pnpm typecheck
+          pnpm exec vitest run src --coverage --coverage.provider=v8 --coverage.include=src/data-utils.ts --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=70
+          pnpm build
+
+  container-builds:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Build backend container
+        run: docker build --tag dataflow-api:${GITHUB_SHA} backend
+      - name: Build frontend container
+        run: docker build --tag dataflow-web:${GITHUB_SHA} frontend
+
+  publish:
+    needs: [backend-quality, frontend-quality, container-builds]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; nothing to create."
+            exit 0
+          fi
+          prerelease=""
+          version_without_build="${GITHUB_REF_NAME%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            prerelease="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" $prerelease

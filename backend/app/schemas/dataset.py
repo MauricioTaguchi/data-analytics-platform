@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.schemas.validation import bounded_json
 
 
 class DatasetResponse(BaseModel):
@@ -24,6 +26,8 @@ class PreviewResponse(BaseModel):
     columns: list[str]
     rows: list[dict[str, Any]]
     total_rows: int
+    total_columns: int
+    columns_truncated: int
     page: int
     page_size: int
 
@@ -32,6 +36,11 @@ class TransformationRequest(BaseModel):
     operation: Literal["drop_columns", "rename_columns", "fill_nulls", "drop_duplicates", "cast_types"]
     parameters: dict[str, Any] = Field(default_factory=dict)
     expected_version: int = Field(ge=1)
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return bounded_json(value, max_bytes=20_000, label="Transformation parameters")
 
 
 class TransformationPreviewResponse(BaseModel):
@@ -61,6 +70,8 @@ class JobResponse(BaseModel):
     task_id: str
     status: str
     progress: int = 0
+    stage: str | None = None
+    error_message: str | None = None
     result: dict[str, Any] | None = None
 
 

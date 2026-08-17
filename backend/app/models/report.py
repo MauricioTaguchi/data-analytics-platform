@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.sql import func
 from app.db.base import Base
 
@@ -13,3 +13,12 @@ class Report(Base):
     file_path = Column(String(500), nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')",
+            name="ck_reports_status",
+        ),
+        Index("ix_reports_project_created_at", "project_id", "created_at"),
+        Index("ix_reports_status_created_at", "status", "created_at"),
+    )

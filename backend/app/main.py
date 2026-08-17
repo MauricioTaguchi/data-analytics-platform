@@ -12,6 +12,10 @@ from app.api.v1.router import api_router
 from app.core.cache import CacheService
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
+from app.core.upload_guard import (
+    RequestBodyLimitMiddleware,
+    UploadAdmissionMiddleware,
+)
 from app.db.session import engine
 
 
@@ -21,6 +25,8 @@ app = FastAPI(
     description="Analytics platform for data ingestion, profiling, transformation, dashboards, and reports.",
 )
 
+app.add_middleware(UploadAdmissionMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,

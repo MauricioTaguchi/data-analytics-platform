@@ -9,6 +9,11 @@ from app.services.dataset_service import DatasetService
 
 class DashboardService:
     @staticmethod
+    def _drop_nan_aggregates(grouped: pd.Series) -> pd.Series:
+        """Remove non-JSON NaN aggregates without dropping numeric zero values."""
+        return grouped[grouped.notna()]
+
+    @staticmethod
     def ensure_project(db: Session, project_id: int, owner_id: int) -> Project:
         project = (
             db.query(Project)
@@ -71,7 +76,14 @@ class DashboardService:
                     filtered = filtered[filtered[column] <= rule["lte"]]
                 if "contains" in rule:
                     filtered = filtered[
-                        filtered[column].astype(str).str.contains(str(rule["contains"]), case=False, na=False)
+                        filtered[column]
+                        .astype(str)
+                        .str.contains(
+                            str(rule["contains"]),
+                            case=False,
+                            na=False,
+                            regex=False,
+                        )
                     ]
         return filtered
 
@@ -117,6 +129,8 @@ class DashboardService:
             }[agg]()
             if hasattr(value, "item"):
                 value = value.item()
+            if pd.isna(value):
+                value = None
             return {"labels": [chart.title], "values": [value], "rows": []}
 
         if not chart.x_column or chart.x_column not in df.columns:
@@ -127,8 +141,8 @@ class DashboardService:
                 grouped = (
                     df.groupby(chart.x_column, dropna=False)[chart.y_column]
                     .agg(chart.aggregation or "sum")
-                    .head(20)
                 )
+                grouped = cls._drop_nan_aggregates(grouped).head(20)
             else:
                 grouped = df[chart.x_column].astype(str).value_counts().head(20)
             return {
@@ -141,7 +155,8 @@ class DashboardService:
             raise ValueError("Invalid Y column.")
 
         agg = chart.aggregation or "sum"
-        grouped = df.groupby(chart.x_column, dropna=False)[chart.y_column].agg(agg).head(100)
+        grouped = df.groupby(chart.x_column, dropna=False)[chart.y_column].agg(agg)
+        grouped = cls._drop_nan_aggregates(grouped).head(100)
         labels = [str(v) for v in grouped.index.tolist()]
         values = [v.item() if hasattr(v, "item") else v for v in grouped.tolist()]
         return {"labels": labels, "values": values, "rows": []}

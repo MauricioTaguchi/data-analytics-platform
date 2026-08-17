@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
@@ -24,4 +24,19 @@ class Dataset(Base):
         "Transformation",
         back_populates="dataset",
         cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_datasets_version_positive"),
+        CheckConstraint("row_count IS NULL OR row_count >= 0", name="ck_datasets_row_count_nonnegative"),
+        CheckConstraint(
+            "column_count IS NULL OR column_count >= 0",
+            name="ck_datasets_column_count_nonnegative",
+        ),
+        CheckConstraint(
+            "status IN ('uploaded', 'queued', 'processing', 'ready', 'failed', "
+            "'profiling', 'profiled', 'transforming', 'cancelled')",
+            name="ck_datasets_status",
+        ),
+        Index("ix_datasets_project_active_created", "project_id", "deleted_at", "created_at"),
     )
