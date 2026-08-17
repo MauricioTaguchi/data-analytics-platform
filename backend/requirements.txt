@@ -16,4 +16,4 @@ xlrd==2.0.1
 pyarrow==25.0.0
 redis==5.2.1
 celery==5.4.0
-reportlab==4.2.5
+reportlab==5.0.0
