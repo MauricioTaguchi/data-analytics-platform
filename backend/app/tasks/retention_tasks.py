@@ -26,6 +26,7 @@ def remove_expired_job_history(batch_size: int | None = None):
                 )
                 .order_by(JobRecord.finished_at, JobRecord.task_id)
                 .limit(limit)
+                .with_for_update(skip_locked=True)
                 .all()
             )
         ]

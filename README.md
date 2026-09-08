@@ -108,7 +108,7 @@ CI additionally runs ESLint, targeted frontend coverage, PostgreSQL/Redis integr
 - `POST /api/v1/datasets/{dataset_id}/profile` — enqueue profiling
 - `POST /api/v1/datasets/{dataset_id}/transform/preview` — enqueue a dry-run against an expected version
 - `POST /api/v1/datasets/{dataset_id}/transform` — enqueue an idempotent transformation
-- `POST /api/v1/datasets/{dataset_id}/transformations/undo` — restore the previous version
+- `POST /api/v1/datasets/{dataset_id}/transformations/undo` — restore previous content with `{"expected_version": 3}`; the revision keeps increasing
 - `POST /api/v1/dashboards` and `/dashboards/{id}/charts` — create persisted visualizations
 - `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` — enqueue a PDF report
 - `DELETE /api/v1/reports/{report_id}` — remove a terminal report and release its storage
@@ -120,7 +120,7 @@ Authentication supports registration, login, automatic refresh-token rotation, a
 - Local versioned files keep the project easy to run; horizontally scaled production should use encrypted object storage.
 - The upload receive cap is process-local; total concurrent uploads scale with API worker count, so production still needs edge request-size, timeout, and connection limits.
 - Application request guards bound bodies seen by FastAPI, but they complement rather than replace reverse-proxy and ASGI-server limits for slow or unread request streams.
-- Pandas is appropriate for bounded portfolio workloads; the worker has row, column, output-byte, profile-result, time, memory, and lifecycle limits. Larger workloads belong in a distributed engine.
+- Pandas remains the default for bounded workloads. Optional Polars and DuckDB adapters process Parquet projections in supervised subprocesses; other operations remain explicit capabilities of Pandas. Native memory and spill watchdogs complement container resource limits.
 - The local demo is intentionally non-persistent and clearly labeled.
 - Chart aggregation is synchronous today and bounded by the dataset limit; expensive analytical queries can move to a dedicated query worker later.
 
@@ -130,6 +130,7 @@ Authentication supports registration, login, automatic refresh-token rotation, a
 - [API examples](docs/API_EXAMPLES.md)
 - [Deployment guide](docs/DEPLOYMENT.md)
 - [Operations and observability](docs/OPERATIONS.md)
+- [Processing, recovery, and upgrade procedure](docs/PROCESSING_RECOVERY.md)
 - [Release process](docs/RELEASES.md)
 - [Known limitations](docs/LIMITATIONS.md)
 - [Security model](docs/SECURITY.md)

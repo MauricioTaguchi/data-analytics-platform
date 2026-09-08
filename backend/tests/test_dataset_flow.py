@@ -97,6 +97,7 @@ def test_complete_dataset_flow(client, auth_headers):
 
     undo = client.post(
         f"/api/v1/datasets/{dataset_id}/transformations/undo",
+        json={"expected_version": 2},
         headers=auth_headers,
     )
     assert undo.status_code == 200

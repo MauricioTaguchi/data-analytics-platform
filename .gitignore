@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
+/data/
 backend/data/uploads/*
 !backend/data/uploads/.gitkeep
 backend/data/reports/*
@@ -12,7 +13,7 @@ frontend/dist/
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
-backend/.coverage
+backend/.coverage*
 backend/htmlcov/
 backend/.mypy_cache/
 backend/.ruff_cache/

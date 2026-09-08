@@ -7,8 +7,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
 
-COPY requirements.txt .
+COPY requirements.txt requirements-engines.txt ./
+ARG INSTALL_OPTIONAL_ENGINES=false
 RUN pip install --no-cache-dir -r requirements.txt
+RUN if [ "$INSTALL_OPTIONAL_ENGINES" = "true" ]; then pip install --no-cache-dir -r requirements-engines.txt; fi
 
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app
 

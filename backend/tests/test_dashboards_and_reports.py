@@ -11,6 +11,7 @@ from app.models.report import Report
 from app.models.transformation import Transformation
 from app.services.dashboard_service import DashboardService
 from app.services.dataset_service import DatasetService
+from app.services.artifact_service import ArtifactService
 from app.services.storage_service import storage
 from tests.conftest import wait_for_job
 
@@ -297,8 +298,17 @@ def test_transformation_final_commit_is_reconciled_without_orphaning_output(
         headers=auth_headers,
     ).json()
     assert history[0]["status"] == expected_transformation
+    # A rejected/ambiguous commit leaves tracked bytes for reconciliation;
+    # collection must remove abandoned attempts and preserve a committed head.
+    ArtifactService.cleanup()
     csv_artifacts = list(tmp_path.glob("*.csv"))
     assert len(csv_artifacts) == (2 if commit_succeeds else 1)
+    assert client.get(
+        f"/api/v1/datasets/jobs/{queued.json()['task_id']}", headers=auth_headers,
+    ).json()["status"] == expected_job
+    assert client.get(
+        f"/api/v1/datasets/{dataset_id}", headers=auth_headers,
+    ).json()["version"] == expected_version
 
 
 def test_transformation_idempotency_and_version_conflict(client, auth_headers):

@@ -1,6 +1,6 @@
 from io import BufferedRandom
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, Protocol
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -8,10 +8,24 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from app.models.dataset import Dataset
-from app.models.project import Project
 from app.services.dataset_service import DatasetService
 from app.services.storage_service import storage
+
+
+class ProjectView(Protocol):
+    @property
+    def name(self) -> str: ...
+
+
+class DatasetReportView(Protocol):
+    @property
+    def stored_path(self) -> str: ...
+
+    @property
+    def original_filename(self) -> str: ...
+
+    @property
+    def profile_json(self) -> dict[str, Any] | None: ...
 
 
 class ReportSizeLimitError(ValueError):
@@ -60,7 +74,7 @@ def escape_pdf_text(value: object) -> str:
 
 class ReportService:
     @staticmethod
-    def generate_pdf(project: Project, dataset: Dataset, output_path: Path | BinaryIO) -> None:
+    def generate_pdf(project: ProjectView, dataset: DatasetReportView, output_path: Path | BinaryIO) -> None:
         profile = dataset.profile_json or DatasetService.build_profile(dataset)
         styles = getSampleStyleSheet()
         destination = output_path if hasattr(output_path, "write") else str(output_path)

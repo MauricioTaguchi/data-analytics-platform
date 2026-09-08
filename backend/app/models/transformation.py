@@ -1,6 +1,8 @@
+from datetime import datetime
+from typing import Any
+
 from sqlalchemy import (
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     Index,
@@ -10,31 +12,34 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
+
 from app.db.base import Base
+
 
 class Transformation(Base):
     __tablename__ = "transformations"
 
-    id = Column(Integer, primary_key=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
-    operation = Column(String(80), nullable=False)
-    parameters = Column(JSON, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    status = Column(String(30), default="completed", nullable=False, index=True)
-    task_id = Column(String(64), nullable=True, unique=True, index=True)
-    idempotency_key = Column(String(120), nullable=True)
-    expected_version = Column(Integer, nullable=False, default=1)
-    input_path = Column(String(500), nullable=False)
-    output_path = Column(String(500), nullable=False)
-    before_rows = Column(Integer, nullable=False)
-    after_rows = Column(Integer, nullable=False)
-    before_columns = Column(Integer, nullable=False)
-    after_columns = Column(Integer, nullable=False)
-    error_message = Column(Text, nullable=True)
-    undone_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    engine_name: Mapped[str] = mapped_column(String(20), nullable=False, default="pandas", server_default="pandas")
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="completed", nullable=False, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    expected_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    output_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    before_rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_columns: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_columns: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=True)
 
     dataset = relationship("Dataset", back_populates="transformations")
 

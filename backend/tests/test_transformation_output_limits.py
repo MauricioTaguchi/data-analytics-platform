@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -5,6 +7,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.project import Project
+from app.models.storage_artifact import StorageArtifact
 from app.models.transformation import Transformation
 from app.models.user import User
 from app.services.dataset_service import (
@@ -13,6 +16,21 @@ from app.services.dataset_service import (
     UserStorageQuotaError,
 )
 from app.services.storage_service import StorageCapacityError, storage
+from app.services.job_service import JobService
+
+
+def _start_transformation_job(db, transformation, task_id):
+    transformation.task_id = task_id
+    db.flush()
+    JobService.create(
+        db, task_id=task_id, owner_id=transformation.user_id,
+        dataset_id=transformation.dataset_id, kind="transformation",
+        transformation_id=transformation.id,
+    )
+    db.commit()
+    _, acquired = JobService.start(db, task_id, attempt_token="writer-attempt")
+    assert acquired
+    db.commit()
 
 
 def test_limited_csv_writer_stops_expansion_and_removes_partial_file(tmp_path):
@@ -127,12 +145,13 @@ def test_transformation_aborts_expanding_fill_nulls_before_commit(
             after_columns=0,
         )
         db.add(transformation)
-        db.commit()
+        _start_transformation_job(db, transformation, "output-expansion-limit")
 
         with pytest.raises(DatasetExpansionLimitError):
             DatasetService.execute_prepared_transformation(
                 db,
                 transformation.id,
+                attempt_token="writer-attempt",
                 transaction_fence=lambda: fence_observations.append(
                     (output_path.exists(), bool(list(tmp_path.glob(".*.part.csv"))))
                 ),
@@ -140,8 +159,14 @@ def test_transformation_aborts_expanding_fill_nulls_before_commit(
 
         db.refresh(dataset)
         db.refresh(transformation)
-        assert dataset.status == "ready"
-        assert transformation.status == "failed"
+        # The domain service cannot fail a job without its terminal-state
+        # fence. The task handler decides retry/failure in its own transaction.
+        assert dataset.status == "transforming"
+        assert transformation.status == "pending"
+        assert JobService.get(db, "output-expansion-limit").status == "STARTED"
+        reservation = db.query(StorageArtifact).one()
+        assert reservation.state == "RESERVED"
+        assert not Path(reservation.final_path).exists()
         assert fence_observations == []
         assert not output_path.exists()
         assert not list(tmp_path.glob(".*.part.csv"))
@@ -186,11 +211,12 @@ def test_transformation_fences_after_temp_write_and_before_final_rename(tmp_path
             after_columns=0,
         )
         db.add(transformation)
-        db.commit()
+        _start_transformation_job(db, transformation, "publication-fence")
 
         completed = DatasetService.execute_prepared_transformation(
             db,
             transformation.id,
+            attempt_token="writer-attempt",
             transaction_fence=lambda: observations.append(
                 (
                     output_path.exists(),
@@ -198,11 +224,17 @@ def test_transformation_fences_after_temp_write_and_before_final_rename(tmp_path
                 )
             ),
         )
+        JobService.succeed(
+            db, "publication-fence", {"status": "completed"}, attempt_token="writer-attempt"
+        )
         db.commit()
 
         assert observations == [(False, 1)]
         assert completed.status == "completed"
-        assert output_path.exists()
+        assert Path(completed.output_path).exists()
+        assert completed.output_path != str(output_path)
+        assert not output_path.exists()
+        assert db.query(StorageArtifact).one().state == "LIVE"
         assert not list(tmp_path.glob(".*.part.csv"))
     finally:
         db.close()

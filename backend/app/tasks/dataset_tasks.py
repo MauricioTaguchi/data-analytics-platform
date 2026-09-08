@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.transformation import Transformation
 from app.services.dataset_service import DatasetService
+from app.services.artifact_service import ArtifactService
 from app.services.job_service import (
     CANCELLATION_JOB_STATUSES,
     JobCancellationRequested,
@@ -23,13 +24,56 @@ from app.worker import celery_app
 logger = logging.getLogger("dataflow.jobs")
 
 
+def _validate_job_target(db, task_id: str, *, dataset_id=None, transformation_id=None, kind=None) -> None:
+    """Treat broker arguments as selectors, never as ownership authority."""
+    job = JobService.get(db, task_id)
+    if job is None:
+        raise JobStateConflict("The task has no durable job record.")
+    if kind is not None and job.kind != kind:
+        raise JobStateConflict("The task kind does not match its durable job.")
+    if dataset_id is not None and job.dataset_id != dataset_id:
+        raise JobStateConflict("The task arguments do not match the job's dataset.")
+    if transformation_id is not None:
+        if job.kind != "transformation":
+            raise JobStateConflict("The task kind does not match its durable job.")
+        transformation = db.query(Transformation).filter(Transformation.id == transformation_id).first()
+        if transformation is not None and (
+            job.transformation_id != transformation.id
+            or job.dataset_id != transformation.dataset_id
+            or job.owner_id != transformation.user_id
+            or transformation.task_id != task_id
+        ):
+            raise JobStateConflict("The task arguments do not match the job's transformation.")
+
+
 def _cancellation_pending(db, task_id: str) -> bool:
     job = JobService.get(db, task_id)
     return bool(job and job.status in CANCELLATION_JOB_STATUSES)
 
 
-def _retry_exhausted(task) -> bool:
-    return task.max_retries is not None and task.request.retries >= task.max_retries
+def _retry_exhausted(task, db) -> bool:
+    job = JobService.get(db, str(task.request.id))
+    return bool(
+        (task.max_retries is not None and task.request.retries >= task.max_retries)
+        or (job and job.attempt_count >= job.max_attempts)
+    )
+
+
+def _fail_transformation(db, transformation_id: int, error_message: str) -> None:
+    """Called only after acquiring the durable job's terminal-state fence."""
+    transformation = db.query(Transformation).filter(Transformation.id == transformation_id).first()
+    if transformation is None or transformation.status in {"completed", "undone"}:
+        return
+    if transformation.task_id:
+        job = JobService.get(db, transformation.task_id)
+        if job and job.attempt_token:
+            ArtifactService.abandon_attempt(db, job.task_id, job.attempt_token)
+    transformation.status = "failed"
+    transformation.error_message = error_message[:2_000]
+    dataset = db.query(Dataset).filter(Dataset.id == transformation.dataset_id).first()
+    if (dataset and dataset.version == transformation.expected_version
+            and dataset.stored_path == transformation.input_path):
+        dataset.status = "ready"
 
 
 def _lease_checkpoint(db, task_id: str, attempt_token: str) -> None:
@@ -57,6 +101,7 @@ def _recover_transformation_finalization(
     output_path: Path | None = None
     outcome = "failed"
     try:
+        _validate_job_target(recovery, task_id, transformation_id=transformation_id)
         job = JobService.get(recovery, task_id)
         transformation = (
             recovery.query(Transformation)
@@ -76,10 +121,11 @@ def _recover_transformation_finalization(
             job is not None
             and job.status == "SUCCESS"
             and transformation is not None
-            and transformation.status == "completed"
-            and dataset is not None
-            and dataset.stored_path == transformation.output_path
-            and dataset.version == transformation.expected_version + 1
+            and transformation.status in {"completed", "undone"}
+            and job.transformation_id == transformation.id
+            and job.dataset_id == transformation.dataset_id
+            and job.owner_id == transformation.user_id
+            and transformation.task_id == task_id
         ):
             recovery.rollback()
             return "completed"
@@ -116,6 +162,9 @@ def _recover_transformation_finalization(
                 and dataset.stored_path == transformation.input_path
             ):
                 dataset.status = "ready"
+        if output_path is not None:
+            ArtifactService.schedule_delete(recovery, output_path)
+        ArtifactService.abandon_attempt(recovery, task_id, attempt_token)
         recovery.commit()
     except Exception:
         recovery.rollback()
@@ -152,6 +201,7 @@ def import_dataset_task(self, dataset_id: int):
     attempt_token = uuid4().hex
     db = SessionLocal()
     try:
+        _validate_job_target(db, task_id, dataset_id=dataset_id, kind="import")
         job, acquired = JobService.start(
             db,
             task_id,
@@ -234,6 +284,8 @@ def import_dataset_task(self, dataset_id: int):
             cancelled.status = "cancelled"
             cancelled.deleted_at = datetime.now(timezone.utc)
             cancelled_path = Path(cancelled.stored_path)
+        if cancelled_path:
+            ArtifactService.schedule_delete(db, cancelled_path)
         db.commit()
         if cancelled_path:
             storage.delete(cancelled_path)
@@ -260,18 +312,20 @@ def import_dataset_task(self, dataset_id: int):
                 db.rollback()
                 return {"status": "superseded", "dataset_id": dataset_id}
             cancelled = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-            cancelled_path: Path | None = None
+            cancelled_path = None
             if cancelled and cancelled.status not in {"ready", "profiled"}:
                 cancelled.status = "cancelled"
                 cancelled.deleted_at = datetime.now(timezone.utc)
                 cancelled_path = Path(cancelled.stored_path)
+            if cancelled_path:
+                ArtifactService.schedule_delete(db, cancelled_path)
             db.commit()
             if cancelled_path:
                 storage.delete(cancelled_path)
             return {"status": "cancelled", "dataset_id": dataset_id}
         retryable = db.query(Dataset).filter(Dataset.id == dataset_id).first()
         failed_path: Path | None = None
-        if _retry_exhausted(self):
+        if _retry_exhausted(self, db):
             transitioned = JobService.fail(
                 db,
                 task_id,
@@ -291,6 +345,8 @@ def import_dataset_task(self, dataset_id: int):
                 return {"status": "superseded", "dataset_id": dataset_id}
             if retryable:
                 retryable.status = "queued"
+        if failed_path:
+            ArtifactService.schedule_delete(db, failed_path)
         db.commit()
         if failed_path:
             storage.delete(failed_path)
@@ -311,6 +367,8 @@ def import_dataset_task(self, dataset_id: int):
         if failed:
             failed.status = "failed"
             failed_path = Path(failed.stored_path)
+        if failed_path:
+            ArtifactService.schedule_delete(db, failed_path)
         db.commit()
         if failed_path:
             storage.delete(failed_path)
@@ -332,7 +390,28 @@ def profile_dataset_task(self, dataset_id: int):
     task_id = str(self.request.id)
     attempt_token = uuid4().hex
     db = SessionLocal()
+    expected_version: int | None = None
+    input_path: str | None = None
+
+    def restore_ready() -> None:
+        # The caller already fenced the job. Never reset a newer operation's
+        # state when this attempt failed after its source snapshot changed.
+        if expected_version is not None and input_path is not None:
+            db.query(Dataset).filter(
+                Dataset.id == dataset_id,
+                Dataset.version == expected_version,
+                Dataset.stored_path == input_path,
+                Dataset.status == "profiling",
+                Dataset.deleted_at.is_(None),
+            ).update({Dataset.status: "ready"}, synchronize_session=False)
+
     try:
+        _validate_job_target(db, task_id, dataset_id=dataset_id, kind="profile")
+        identity = JobService.get(db, task_id)
+        if identity is None:
+            raise JobStateConflict("The profile task has no durable job record.")
+        owner_id = int(identity.owner_id)
+        JobService.lock_owner(db, owner_id)
         job, acquired = JobService.start(
             db,
             task_id,
@@ -342,9 +421,19 @@ def profile_dataset_task(self, dataset_id: int):
         if not acquired:
             return job.result_json or {"status": job.status.lower()}
         db.commit()
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if not dataset:
+        JobService.lock_owner(db, owner_id)
+        JobService.ensure_active(db, task_id, attempt_token=attempt_token)
+        dataset = (
+            db.query(Dataset)
+            .execution_options(populate_existing=True)
+            .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None))
+            .with_for_update()
+            .first()
+        )
+        if dataset is None:
             raise ValueError("Dataset no longer exists.")
+        expected_version = int(dataset.version)
+        input_path = str(dataset.stored_path)
         if dataset.profile_json:
             result = {"status": "completed", "dataset_id": dataset.id, "cached": True}
             JobService.succeed(db, task_id, result, attempt_token=attempt_token)
@@ -360,19 +449,12 @@ def profile_dataset_task(self, dataset_id: int):
             progress=15,
             stage="reading",
         )
-        dataset_snapshot = SimpleNamespace(stored_path=str(dataset.stored_path))
+        dataset_snapshot = SimpleNamespace(stored_path=input_path)
         db.commit()
         profile = DatasetService.build_profile(dataset_snapshot)
         JobService.ensure_result_size(profile, label="Dataset profile")
         _lease_checkpoint(db, task_id, attempt_token)
-        dataset = (
-            db.query(Dataset)
-            .execution_options(populate_existing=True)
-            .filter(Dataset.id == dataset_id)
-            .first()
-        )
-        if not dataset:
-            raise ValueError("Dataset no longer exists during profile finalization.")
+        JobService.lock_owner(db, owner_id)
         JobService.progress(
             db,
             task_id,
@@ -380,12 +462,24 @@ def profile_dataset_task(self, dataset_id: int):
             progress=80,
             stage="persisting",
         )
+        dataset = (
+            db.query(Dataset)
+            .execution_options(populate_existing=True)
+            .filter(Dataset.id == dataset_id)
+            .with_for_update()
+            .first()
+        )
+        if (
+            dataset is None or dataset.deleted_at is not None
+            or dataset.version != expected_version or dataset.stored_path != input_path
+            or dataset.status != "profiling"
+        ):
+            raise ValueError("Dataset changed while its profile was being built.")
         dataset.profile_json = profile
         dataset.status = "profiled"
         result = {"status": "completed", "dataset_id": dataset.id, "progress": 100}
         JobService.succeed(db, task_id, result, attempt_token=attempt_token)
         db.commit()
-        CacheService.set_json(f"dataset:{dataset_id}:profile", profile, ttl=1800)
         return result
     except JobCancellationRequested:
         db.rollback()
@@ -397,9 +491,7 @@ def profile_dataset_task(self, dataset_id: int):
         ):
             db.rollback()
             return {"status": "superseded", "dataset_id": dataset_id}
-        cancelled = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if cancelled and cancelled.status == "profiling":
-            cancelled.status = "ready"
+        restore_ready()
         db.commit()
         return {"status": "cancelled", "dataset_id": dataset_id}
     except JobLeaseUnavailable as exc:
@@ -423,13 +515,10 @@ def profile_dataset_task(self, dataset_id: int):
             ):
                 db.rollback()
                 return {"status": "superseded", "dataset_id": dataset_id}
-            cancelled = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-            if cancelled and cancelled.status == "profiling":
-                cancelled.status = "ready"
+            restore_ready()
             db.commit()
             return {"status": "cancelled", "dataset_id": dataset_id}
-        retryable = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if _retry_exhausted(self):
+        if _retry_exhausted(self, db):
             transitioned = JobService.fail(
                 db,
                 task_id,
@@ -439,20 +528,16 @@ def profile_dataset_task(self, dataset_id: int):
             if not transitioned:
                 db.rollback()
                 return {"status": "superseded", "dataset_id": dataset_id}
-            if retryable and retryable.status == "profiling":
-                retryable.status = "ready"
         else:
             transitioned = JobService.retry(db, task_id, str(exc), attempt_token=attempt_token)
             if not transitioned:
                 db.rollback()
                 return {"status": "superseded", "dataset_id": dataset_id}
-            if retryable:
-                retryable.status = "ready"
+        restore_ready()
         db.commit()
         raise
     except Exception as exc:
         db.rollback()
-        failed = db.query(Dataset).filter(Dataset.id == dataset_id).first()
         transitioned = JobService.fail(
             db,
             task_id,
@@ -462,8 +547,7 @@ def profile_dataset_task(self, dataset_id: int):
         if not transitioned:
             db.rollback()
             return {"status": "superseded", "dataset_id": dataset_id}
-        if failed and failed.status == "profiling":
-            failed.status = "ready"
+        restore_ready()
         db.commit()
         raise
     finally:
@@ -490,6 +574,7 @@ def preview_transformation_task(
     attempt_token = uuid4().hex
     db = SessionLocal()
     try:
+        _validate_job_target(db, task_id, dataset_id=dataset_id, kind="transformation-preview")
         job, acquired = JobService.start(
             db,
             task_id,
@@ -560,7 +645,7 @@ def preview_transformation_task(
                 return {"status": "superseded", "dataset_id": dataset_id}
             db.commit()
             return {"status": "cancelled", "dataset_id": dataset_id}
-        if _retry_exhausted(self):
+        if _retry_exhausted(self, db):
             transitioned = JobService.fail(
                 db,
                 task_id,
@@ -608,6 +693,7 @@ def transform_dataset_task(self, transformation_id: int):
     completed_dataset_id: int | None = None
     result: dict | None = None
     try:
+        _validate_job_target(db, task_id, transformation_id=transformation_id)
         job, acquired = JobService.start(
             db,
             task_id,
@@ -624,6 +710,7 @@ def transform_dataset_task(self, transformation_id: int):
         completed = DatasetService.execute_prepared_transformation(
             db,
             transformation_id,
+            attempt_token=attempt_token,
             checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
             transaction_fence=lambda: JobService.progress(
                 db,
@@ -667,6 +754,8 @@ def transform_dataset_task(self, transformation_id: int):
             dataset = db.query(Dataset).filter(Dataset.id == cancelled.dataset_id).first()
             if dataset and dataset.version == cancelled.expected_version:
                 dataset.status = "ready"
+        if cancelled_path:
+            ArtifactService.schedule_delete(db, cancelled_path)
         db.commit()
         if cancelled_path:
             storage.delete(cancelled_path)
@@ -726,11 +815,13 @@ def transform_dataset_task(self, transformation_id: int):
                 dataset = db.query(Dataset).filter(Dataset.id == cancelled.dataset_id).first()
                 if dataset and dataset.version == cancelled.expected_version:
                     dataset.status = "ready"
+            if cancelled_path:
+                ArtifactService.schedule_delete(db, cancelled_path)
             db.commit()
             if cancelled_path:
                 storage.delete(cancelled_path)
             return {"status": "cancelled", "transformation_id": transformation_id}
-        if _retry_exhausted(self):
+        if _retry_exhausted(self, db):
             transitioned = JobService.fail(
                 db,
                 task_id,
@@ -752,6 +843,8 @@ def transform_dataset_task(self, transformation_id: int):
         if not transitioned:
             db.rollback()
             return {"status": "superseded", "transformation_id": transformation_id}
+        if _retry_exhausted(self, db):
+            _fail_transformation(db, transformation_id, str(exc))
         db.commit()
         raise
     except Exception as exc:
@@ -778,6 +871,7 @@ def transform_dataset_task(self, transformation_id: int):
         if not transitioned:
             db.rollback()
             return {"status": "superseded", "transformation_id": transformation_id}
+        _fail_transformation(db, transformation_id, str(exc))
         db.commit()
         raise
     finally:

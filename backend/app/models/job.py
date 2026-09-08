@@ -1,4 +1,8 @@
-from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.db.base import Base
@@ -7,26 +11,28 @@ from app.db.base import Base
 class JobRecord(Base):
     __tablename__ = "job_records"
 
-    task_id = Column(String(64), primary_key=True)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     # Import jobs are reserved before the request body finishes streaming, so
     # the dataset is attached only after its file has been staged safely.
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True, index=True)
-    report_id = Column(Integer, ForeignKey("reports.id"), nullable=True, index=True)
-    transformation_id = Column(Integer, ForeignKey("transformations.id"), nullable=True, index=True)
-    kind = Column(String(40), nullable=False)
-    status = Column(String(30), nullable=False, default="PENDING", server_default="PENDING")
-    progress = Column(Integer, nullable=False, default=0, server_default="0")
-    stage = Column(String(80), nullable=True)
-    result_json = Column(JSON, nullable=True)
-    error_message = Column(Text, nullable=True)
-    attempt_token = Column(String(64), nullable=True)
-    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
-    cancellation_requested_at = Column(DateTime(timezone=True), nullable=True)
-    started_at = Column(DateTime(timezone=True), nullable=True)
-    finished_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
+    dataset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("datasets.id"), nullable=True, index=True)
+    report_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("reports.id"), nullable=True, index=True)
+    transformation_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("transformations.id"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING", server_default="PENDING")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    stage: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=4, server_default="4")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),

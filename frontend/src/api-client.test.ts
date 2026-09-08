@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile } from "./api-client";
+import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
 
 const originalAdapter = apiClient.defaults.adapter;
 
@@ -20,6 +20,18 @@ afterEach(async () => {
 });
 
 describe("API session client", () => {
+  it("sends the observed revision when undoing and surfaces conflicts", async () => {
+    const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.url).toBe("/datasets/7/transformations/undo");
+      expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      const conflict = response(config, 409, { detail: "Dataset version changed." });
+      throw new AxiosError("Dataset version changed.", "ERR_BAD_REQUEST", config, undefined, conflict);
+    });
+    apiClient.defaults.adapter = adapter;
+    await expect(undoDatasetTransformation(7, 8)).rejects.toThrow("Dataset version changed.");
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the production API only for the explicitly trusted web host", () => {
     expect(defaultApiUrlForHostname("data-analytics-web.onrender.com"))
       .toBe("https://data-analytics-api.onrender.com/api/v1");

@@ -404,8 +404,8 @@ export async function fetchTransformationHistory(datasetId: number, signal?: Abo
   return response.data;
 }
 
-export async function undoDatasetTransformation(datasetId: number) {
-  const response = await apiClient.post<TransformationResult>(`/datasets/${datasetId}/transformations/undo`);
+export async function undoDatasetTransformation(datasetId: number, expectedVersion: number) {
+  const response = await apiClient.post<TransformationResult>(`/datasets/${datasetId}/transformations/undo`, { expected_version: expectedVersion });
   return response.data;
 }
 

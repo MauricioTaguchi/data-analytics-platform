@@ -1,0 +1,3 @@
+# Optional native workers. The default installation retains pandas behavior.
+polars==1.44.1
+duckdb==1.5.5

@@ -1,8 +1,10 @@
+from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BufferedRandom, TextIOWrapper
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Protocol
+from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 import pandas as pd
@@ -15,13 +17,12 @@ from app.models.dataset import Dataset
 from app.models.project import Project
 from app.models.report import Report
 from app.models.transformation import Transformation
-from app.models.user import User
-from app.services.job_service import (
-    JobCancellationRequested,
-    JobService,
-    JobStateConflict,
-)
+from app.services.job_service import JobService
 from app.services.storage_service import storage
+from app.services.artifact_service import ArtifactService
+from app.services.engines import (
+    PandasEngineAdapter, ResourcePolicy, SnapshotRef, TransformationPlan, select_engine,
+)
 
 
 ALLOWED_CONTENT_TYPES = {
@@ -31,6 +32,18 @@ ALLOWED_CONTENT_TYPES = {
     ".json": {"application/json", "text/json", "text/plain"},
     ".parquet": {"application/octet-stream", "application/vnd.apache.parquet"},
 }
+
+
+class StoredSnapshot(Protocol):
+    @property
+    def stored_path(self) -> str: ...
+
+
+class ReadySnapshot(StoredSnapshot, Protocol):
+    @property
+    def status(self) -> str: ...
+
+
 class UserStorageQuotaError(ValueError):
     """Raised when a staged file would exceed tracked per-user local storage."""
 
@@ -246,7 +259,7 @@ class DatasetService:
         return project
 
     @staticmethod
-    def ensure_ready(dataset: Dataset) -> None:
+    def ensure_ready(dataset: ReadySnapshot) -> None:
         if dataset.status not in {"ready", "profiled"}:
             raise ValueError(f"Dataset is not ready. Current status: {dataset.status}.")
 
@@ -422,7 +435,7 @@ class DatasetService:
             # PostgreSQL serializes admissions for the same account on this
             # row. SQLite's FOR UPDATE is a no-op, so local test/development
             # concurrency remains best-effort rather than a hard guarantee.
-            db.query(User.id).filter(User.id == owner_id).with_for_update().one()
+            JobService.lock_owner(db, owner_id)
             JobService.ensure_capacity(
                 db,
                 owner_id,
@@ -447,7 +460,7 @@ class DatasetService:
             raise
 
     @classmethod
-    def inspect_staged_dataset(cls, dataset: Dataset) -> dict:
+    def inspect_staged_dataset(cls, dataset: StoredSnapshot) -> dict:
         path = Path(dataset.stored_path)
         try:
             dataframe = cls.read_dataframe(path)
@@ -479,7 +492,7 @@ class DatasetService:
         }
 
     @classmethod
-    def build_profile(cls, dataset: Dataset) -> dict:
+    def build_profile(cls, dataset: StoredSnapshot) -> dict:
         dataframe = cls.read_dataframe(Path(dataset.stored_path))
         cls.validate_dataframe_structure(dataframe)
         all_numeric_columns = dataframe.select_dtypes(include="number")
@@ -487,10 +500,10 @@ class DatasetService:
             :, : settings.MAX_PROFILE_CORRELATION_COLUMNS
         ]
         total_cells = max(int(dataframe.shape[0] * dataframe.shape[1]), 1)
-        columns = []
+        columns: list[dict[str, Any]] = []
         for name in dataframe.columns:
             series = dataframe[name]
-            item = {
+            item: dict[str, Any] = {
                 "name": str(name),
                 "dtype": str(series.dtype),
                 "missing_count": int(series.isna().sum()),
@@ -556,7 +569,7 @@ class DatasetService:
         }
 
     @classmethod
-    def preview_transformation(cls, dataset: Dataset, operation: str, parameters: dict) -> dict:
+    def preview_transformation(cls, dataset: ReadySnapshot, operation: str, parameters: dict) -> dict:
         cls.ensure_ready(dataset)
         before = cls.read_dataframe(Path(dataset.stored_path))
         after = cls.apply_operation(before, operation, parameters)
@@ -593,8 +606,27 @@ class DatasetService:
         expected_version: int,
         idempotency_key: str,
     ) -> tuple[Transformation, bool]:
+        # Take the account lock before either the dataset mutation or the
+        # transformation FK flush, matching transformation publication.
+        JobService.lock_owner(db, user_id)
+        locked_dataset = (
+            db.query(Dataset)
+            .execution_options(populate_existing=True)
+            .join(Project, Project.id == Dataset.project_id)
+            .filter(
+                Dataset.id == dataset.id,
+                Dataset.deleted_at.is_(None),
+                Project.owner_id == user_id,
+            )
+            .with_for_update(of=Dataset)
+            .first()
+        )
+        if locked_dataset is None:
+            raise ValueError("Dataset not found.")
+        dataset = locked_dataset
         existing = (
             db.query(Transformation)
+            .execution_options(populate_existing=True)
             .filter(
                 Transformation.dataset_id == dataset.id,
                 Transformation.user_id == user_id,
@@ -629,6 +661,7 @@ class DatasetService:
             status="pending",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
+            engine_name=settings.TRANSFORMATION_ENGINE,
             input_path=str(input_path),
             output_path=str(output_path),
             before_rows=int(dataset.row_count or 0),
@@ -673,218 +706,176 @@ class DatasetService:
         transformation_id: int,
         checkpoint: Callable[[], object] | None = None,
         transaction_fence: Callable[[], object] | None = None,
+        *,
+        attempt_token: str | None = None,
     ) -> Transformation:
         transformation = (
-            db.query(Transformation)
-            .filter(Transformation.id == transformation_id)
-            .first()
+            db.query(Transformation).execution_options(populate_existing=True)
+            .filter(Transformation.id == transformation_id).first()
         )
         if not transformation:
             raise ValueError("Transformation not found.")
-        if transformation.status == "completed":
+        if transformation.status in {"completed", "undone"}:
             return transformation
-
         owner_id = int(transformation.user_id)
         dataset_id = int(transformation.dataset_id)
         expected_version = int(transformation.expected_version)
         input_path_value = str(transformation.input_path)
         operation = str(transformation.operation)
         parameters = deepcopy(transformation.parameters)
-        final_path = Path(transformation.output_path)
+        engine_name = str(transformation.engine_name)
+        task_id = transformation.task_id
+        if not task_id:
+            raise ValueError("A transformation requires a durable job before execution.")
+        attempt_token = attempt_token or uuid4().hex
+        prepared_path = Path(transformation.output_path)
+        suffix = prepared_path.suffix if engine_name == "pandas" else ".parquet"
+        # Each attempt owns different bytes, including after the rename. A stale
+        # worker can never overwrite/delete the output of its replacement.
+        final_path = prepared_path.with_name(f"{uuid4().hex}{suffix}")
         temporary_path = storage.temporary_version_path(final_path)
-        final_path_written = False
         try:
             if checkpoint:
                 checkpoint()
-            dataset = db.query(Dataset).filter(Dataset.id == transformation.dataset_id).first()
-            if not dataset:
-                raise ValueError("Dataset not found.")
-            if (
-                dataset.version != transformation.expected_version
-                or dataset.stored_path != transformation.input_path
-            ):
+            dataset = (db.query(Dataset).execution_options(populate_existing=True)
+                       .filter(Dataset.id == dataset_id).first())
+            if (not dataset or dataset.deleted_at is not None
+                    or dataset.version != expected_version or dataset.stored_path != input_path_value):
                 raise ValueError("Dataset changed before the transformation could start.")
-
-            transformation.status = "processing"
+            # Persist the reservation before creating either path. The collector
+            # can finish cleanup even when the process dies before error handling.
+            reservation = ArtifactService.reserve(
+                db, owner_id=owner_id, task_id=task_id, attempt_token=attempt_token,
+                final_path=final_path, temporary_path=temporary_path,
+            )
+            reservation_id = reservation.id
             db.commit()
-
             input_path = Path(input_path_value)
             input_size = input_path.stat().st_size
             cls._ensure_transformation_output_size(input_size)
             storage.ensure_capacity(input_size)
-
-            before = cls.read_dataframe(input_path)
-            if checkpoint:
-                checkpoint()
-            after = cls.apply_operation(before, operation, parameters)
-            cls.validate_dataframe_structure(after)
-            if checkpoint:
-                checkpoint()
-
-            # Use a conservative quota snapshot to bound the temporary output
-            # without holding a database transaction during serialization.
-            cls.ensure_storage_quota(
-                db,
-                owner_id,
-                input_size,
-            )
-            quota_limit = settings.USER_STORAGE_QUOTA_MB * 1024 * 1024
-            quota_remaining = max(
-                0,
-                quota_limit
-                - cls.tracked_storage_usage_bytes(db, owner_id),
-            )
-            expanded_limit = settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024
+            cls.ensure_storage_quota(db, owner_id, input_size)
+            quota_remaining = max(0, settings.USER_STORAGE_QUOTA_MB * 1024 * 1024
+                                  - cls.tracked_storage_usage_bytes(db, owner_id))
             db.commit()
-
-            cls.write_dataframe_limited(
-                after,
-                temporary_path,
-                expanded_limit_bytes=expanded_limit,
-                quota_remaining_bytes=quota_remaining,
+            adapter = select_engine(engine_name, pandas=PandasEngineAdapter(
+                read=cls.read_dataframe, transform=cls.apply_operation,
+                validate=cls.validate_dataframe_structure, write=cls.write_dataframe_limited,
+            ))
+            artifact = adapter.materialize(
+                SnapshotRef(input_path), TransformationPlan(operation, parameters), temporary_path,
+                ResourcePolicy(
+                    max_output_bytes=settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024,
+                    quota_remaining_bytes=quota_remaining,
+                    threads=settings.TRANSFORMATION_ENGINE_THREADS,
+                    memory_limit_bytes=settings.TRANSFORMATION_ENGINE_MEMORY_MB * 1024 * 1024,
+                    max_spill_bytes=settings.TRANSFORMATION_ENGINE_SPILL_MB * 1024 * 1024,
+                    timeout_seconds=settings.TRANSFORMATION_ENGINE_TIMEOUT_SECONDS,
+                    max_columns=settings.MAX_DATASET_COLUMNS,
+                    max_column_name_chars=settings.MAX_DATASET_COLUMN_NAME_CHARS,
+                    max_rows=settings.MAX_DATASET_ROWS,
+                ),
+                checkpoint,
             )
-            output_size = temporary_path.stat().st_size
-            cls._ensure_transformation_output_size(output_size)
-
-            # Final admission is intentionally short: serialize first, then
-            # lock the account and durable job only for quota revalidation,
-            # rename, pointer CAS and the caller's final commit.
-            db.query(User.id).filter(User.id == owner_id).with_for_update().one()
+            cls._ensure_transformation_output_size(artifact.size_bytes)
+            # Consistent order: account -> job -> dataset -> artifact. No parse,
+            # engine execution or broker I/O runs while these locks are held.
+            JobService.lock_owner(db, owner_id)
+            JobService.ensure_active(db, task_id, attempt_token=attempt_token)
             if transaction_fence:
                 transaction_fence()
-            transformation = (
-                db.query(Transformation)
-                .execution_options(populate_existing=True)
-                .filter(Transformation.id == transformation_id)
-                .first()
-            )
-            dataset = (
-                db.query(Dataset)
-                .execution_options(populate_existing=True)
-                .filter(Dataset.id == dataset_id)
-                .first()
-            )
-            if not transformation or not dataset:
-                raise ValueError("Transformation target no longer exists.")
-            if (
-                dataset.version != expected_version
-                or dataset.stored_path != input_path_value
-            ):
+            dataset = (db.query(Dataset).execution_options(populate_existing=True)
+                       .filter(Dataset.id == dataset_id).with_for_update().first())
+            transformation = (db.query(Transformation).execution_options(populate_existing=True)
+                              .filter(Transformation.id == transformation_id).with_for_update().first())
+            if (not transformation or not dataset or dataset.deleted_at is not None
+                    or dataset.version != expected_version or dataset.stored_path != input_path_value
+                    or transformation.status in {"completed", "undone", "cancelled"}):
                 raise ValueError("Dataset changed while the transformation output was being built.")
-            cls.ensure_storage_quota(
-                db,
-                owner_id,
-                output_size,
-            )
-            # The file already occupies its bytes; this final check verifies
-            # that the configured free-space floor still holds before commit.
+            cls.ensure_storage_quota(db, owner_id, artifact.size_bytes)
             storage.ensure_capacity()
+            # This row lock arbitrates publication versus garbage collection.
+            # LIVE, the new dataset head and SUCCESS commit together in the caller.
+            ArtifactService.publish(db, reservation_id, attempt_token=attempt_token)
             storage.commit_temporary(temporary_path, final_path)
-            final_path_written = True
-
-            updated = (
-                db.query(Dataset)
-                .filter(
-                    Dataset.id == dataset.id,
-                    Dataset.version == expected_version,
-                    Dataset.stored_path == input_path_value,
-                )
-                .update(
-                    {
-                        Dataset.stored_path: str(final_path),
-                        Dataset.row_count: int(after.shape[0]),
-                        Dataset.column_count: int(after.shape[1]),
-                        Dataset.profile_json: None,
-                        Dataset.version: expected_version + 1,
-                        Dataset.status: "ready",
-                    },
-                    synchronize_session=False,
-                )
-            )
+            updated = (db.query(Dataset).filter(
+                Dataset.id == dataset_id, Dataset.version == expected_version,
+                Dataset.stored_path == input_path_value, Dataset.deleted_at.is_(None),
+            ).update({
+                Dataset.stored_path: str(final_path), Dataset.row_count: artifact.rows,
+                Dataset.column_count: artifact.columns, Dataset.profile_json: None,
+                Dataset.version: expected_version + 1, Dataset.status: "ready",
+            }, synchronize_session=False))
             if updated != 1:
                 raise ValueError("Dataset version conflict detected while committing the transformation.")
-
+            transformation.output_path = str(final_path)
             transformation.status = "completed"
-            transformation.before_rows = int(before.shape[0])
-            transformation.after_rows = int(after.shape[0])
-            transformation.before_columns = int(before.shape[1])
-            transformation.after_columns = int(after.shape[1])
+            transformation.before_rows = artifact.before_rows
+            transformation.after_rows = artifact.rows
+            transformation.before_columns = artifact.before_columns
+            transformation.after_columns = artifact.columns
             transformation.error_message = None
             db.flush()
             db.refresh(transformation)
             return transformation
-        except JobCancellationRequested:
-            storage.delete(temporary_path)
-            if final_path_written:
-                storage.delete(final_path)
+        except Exception:
             db.rollback()
-            raise
-        except JobStateConflict:
-            storage.delete(temporary_path)
-            if final_path_written:
-                storage.delete(final_path)
-            db.rollback()
-            raise
-        except Exception as exc:
-            storage.delete(temporary_path)
-            if final_path_written:
-                # Delete while the transaction still owns the job fence. A
-                # replacement attempt cannot publish to this path until the
-                # rollback below releases the row lock.
-                storage.delete(final_path)
-            db.rollback()
-            if checkpoint:
-                try:
-                    checkpoint()
-                except JobCancellationRequested:
-                    storage.delete(temporary_path)
-                    raise
-                except JobStateConflict:
-                    storage.delete(temporary_path)
-                    raise
-            failed = db.query(Transformation).filter(Transformation.id == transformation_id).first()
-            current_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-            if failed:
-                failed.status = "failed"
-                failed.error_message = str(exc)[:2_000]
-            if current_dataset and current_dataset.version == expected_version:
-                current_dataset.status = "ready"
-            db.commit()
+            # Rollback acknowledgement may be ambiguous. Never unlink a final
+            # output here; its reservation is reconciled against committed state.
+            with suppress(OSError):
+                storage.delete(temporary_path)
             raise
 
     @staticmethod
-    def undo_last(db: Session, dataset: Dataset, user_id: int) -> Transformation:
+    def undo_last(
+        db: Session,
+        dataset: Dataset,
+        user_id: int,
+        *,
+        expected_version: int,
+    ) -> Transformation:
+        JobService.lock_owner(db, user_id)
         locked_dataset = (
             db.query(Dataset)
-            .filter(Dataset.id == dataset.id)
-            .with_for_update()
+            .execution_options(populate_existing=True)
+            .join(Project, Project.id == Dataset.project_id)
+            .filter(
+                Dataset.id == dataset.id,
+                Dataset.deleted_at.is_(None),
+                Project.owner_id == user_id,
+            )
+            .with_for_update(of=Dataset)
             .first()
         )
         if not locked_dataset:
             raise ValueError("Dataset not found.")
+        if locked_dataset.version != expected_version:
+            raise ValueError("Dataset version changed. Refresh and try again.")
         DatasetService.ensure_ready(locked_dataset)
         transformation = (
             db.query(Transformation)
+            .execution_options(populate_existing=True)
             .filter(
-                Transformation.dataset_id == dataset.id,
+                Transformation.dataset_id == locked_dataset.id,
                 Transformation.user_id == user_id,
                 Transformation.status == "completed",
                 Transformation.undone_at.is_(None),
+                Transformation.output_path == locked_dataset.stored_path,
             )
-            .order_by(Transformation.created_at.desc())
+            .order_by(Transformation.id.desc())
             .with_for_update()
             .first()
         )
         if not transformation:
-            raise ValueError("There is no completed transformation to undo.")
-        if locked_dataset.version != transformation.expected_version + 1:
-            raise ValueError("The latest transformation is no longer the active dataset version.")
+            raise ValueError("There is no completed transformation for the active dataset to undo.")
         transformation.undone_at = datetime.now(timezone.utc)
         transformation.status = "undone"
         locked_dataset.stored_path = transformation.input_path
         locked_dataset.row_count = transformation.before_rows
         locked_dataset.column_count = transformation.before_columns
-        locked_dataset.version = max(1, locked_dataset.version - 1)
+        # Restoring older content is a new revision. Never reuse a revision
+        # observed by a queued worker or by a previous client request.
+        locked_dataset.version += 1
         locked_dataset.profile_json = None
         locked_dataset.status = "ready"
         db.commit()

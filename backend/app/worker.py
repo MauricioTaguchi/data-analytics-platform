@@ -31,26 +31,18 @@ celery_app.conf.update(
     task_store_eager_result=settings.CELERY_EAGER,
     task_ignore_result=not settings.CELERY_EAGER,
     task_store_errors_even_if_ignored=False,
+    # The durable outbox owns retries. A publish must return promptly so an
+    # unavailable broker cannot strand the database recovery process.
+    task_publish_retry=False,
+    broker_connection_timeout=5,
+    broker_transport_options={
+        "max_retries": 0,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 5,
+        "retry_on_timeout": False,
+    },
     result_expires=3_600,
     worker_max_memory_per_child=settings.CELERY_WORKER_MAX_MEMORY_KB,
     worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS,
     worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
-    beat_schedule={
-        "remove-orphaned-storage-files": {
-            "task": "storage.remove_orphans",
-            "schedule": 3_600.0,
-        },
-        "remove-expired-refresh-sessions": {
-            "task": "auth.remove_expired_refresh_sessions",
-            "schedule": 3_600.0,
-        },
-        "dispatch-pending-jobs": {
-            "task": "jobs.dispatch_pending",
-            "schedule": 10.0,
-        },
-        "remove-expired-job-history": {
-            "task": "jobs.remove_expired_history",
-            "schedule": 86_400.0,
-        },
-    },
 )
