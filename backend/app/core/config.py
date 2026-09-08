@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -50,6 +52,11 @@ class Settings(BaseSettings):
     MAX_PROFILE_CORRELATION_COLUMNS: int = Field(default=50, ge=2, le=250)
     TRANSFORMATION_PREVIEW_MAX_COLUMNS: int = Field(default=100, ge=1, le=1_000)
     TRANSFORMATION_PREVIEW_MAX_CELL_CHARS: int = Field(default=512, ge=32, le=10_000)
+    TRANSFORMATION_ENGINE: Literal["pandas", "polars", "duckdb"] = "pandas"
+    TRANSFORMATION_ENGINE_THREADS: int = Field(default=2, ge=1, le=16)
+    TRANSFORMATION_ENGINE_MEMORY_MB: int = Field(default=512, ge=64)
+    TRANSFORMATION_ENGINE_SPILL_MB: int = Field(default=512, ge=0)
+    TRANSFORMATION_ENGINE_TIMEOUT_SECONDS: int = Field(default=210, ge=1, le=210)
     MAX_JOB_RESULT_SIZE_MB: int = Field(default=2, ge=1, le=64)
     MAX_REPORT_SIZE_MB: int = Field(default=10, ge=1, le=100)
     STORAGE_BACKEND: str = "local"

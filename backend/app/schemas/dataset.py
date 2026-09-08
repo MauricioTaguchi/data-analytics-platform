@@ -50,6 +50,10 @@ class TransformationPreviewResponse(BaseModel):
     rows: list[dict[str, Any]]
 
 
+class UndoRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
 class TransformationResponse(BaseModel):
     id: int
     operation: str

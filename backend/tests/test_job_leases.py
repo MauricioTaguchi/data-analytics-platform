@@ -29,6 +29,7 @@ from app.tasks.dataset_tasks import (
     transform_dataset_task,
 )
 from app.tasks.maintenance_tasks import remove_orphaned_storage_files
+from app.tasks.report_tasks import generate_report_task
 
 
 def _create_job(task_id: str, *, kind: str = "import") -> tuple[int, int]:
@@ -71,6 +72,37 @@ def test_retry_limits_are_exposed_to_terminal_state_detection():
     assert profile_dataset_task.max_retries == 3
     assert preview_transformation_task.max_retries == 2
     assert transform_dataset_task.max_retries == 2
+
+
+def test_report_cancellation_cannot_use_another_jobs_broker_arguments(monkeypatch):
+    task_id = "cancelled-report-owner"
+    _, own_dataset_id = _create_job(task_id, kind="report")
+    _, foreign_dataset_id = _create_job("foreign-report-owner", kind="report")
+    with SessionLocal() as db:
+        for current_task, dataset_id in ((task_id, own_dataset_id), ("foreign-report-owner", foreign_dataset_id)):
+            dataset = db.get(Dataset, dataset_id)
+            report = Report(
+                project_id=dataset.project_id,
+                dataset_id=dataset_id,
+                task_id=current_task,
+                status="queued",
+            )
+            db.add(report)
+            db.flush()
+            JobService.get(db, current_task).report_id = report.id
+            if current_task != task_id:
+                foreign_report_id = report.id
+        JobService.start(db, task_id, attempt_token="cancel-owner")
+        db.commit()
+        JobService.request_cancellation(db, JobService.get(db, task_id))
+        db.commit()
+    monkeypatch.setattr("app.tasks.report_tasks.uuid4", lambda: SimpleNamespace(hex="cancel-owner"))
+    result = generate_report_task.apply(args=[foreign_report_id], task_id=task_id, throw=True).result
+    assert result["status"] == "superseded"
+    with SessionLocal() as db:
+        assert db.get(Report, foreign_report_id).status == "queued"
+        assert JobService.get(db, "foreign-report-owner").status == "PENDING"
+        assert JobService.get(db, task_id).status == "CANCELLATION_REQUESTED"
 
 
 def test_profile_failure_restores_the_dataset_to_ready(monkeypatch):
@@ -142,6 +174,7 @@ def test_finalization_recovery_honors_a_concurrent_cancellation(tmp_path):
         job = JobService.get(db, task_id)
         assert job is not None
         job.transformation_id = transformation.id
+        db.flush()
         _, acquired = JobService.start(
             db,
             task_id,
@@ -276,6 +309,7 @@ def test_live_lease_defers_redelivery_and_expired_lease_can_be_reacquired():
             task_id,
             {"status": "completed"},
             attempt_token="attempt-two",
+            now=started_at + timedelta(seconds=92),
         ) is True
         db.commit()
 

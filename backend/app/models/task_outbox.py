@@ -1,4 +1,8 @@
-from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.db.base import Base
@@ -9,18 +13,20 @@ class TaskOutbox(Base):
 
     __tablename__ = "task_outbox"
 
-    id = Column(Integer, primary_key=True)
-    task_id = Column(String(64), ForeignKey("job_records.task_id"), nullable=False, unique=True)
-    kind = Column(String(40), nullable=False)
-    payload_json = Column(JSON, nullable=False)
-    status = Column(String(20), nullable=False, default="PENDING", server_default="PENDING")
-    attempts = Column(Integer, nullable=False, default=0, server_default="0")
-    available_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    claimed_at = Column(DateTime(timezone=True), nullable=True)
-    published_at = Column(DateTime(timezone=True), nullable=True)
-    last_error = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), ForeignKey("job_records.task_id"), nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),

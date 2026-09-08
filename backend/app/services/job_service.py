@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import cast
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -48,8 +48,24 @@ class JobResultSizeExceeded(ValueError):
     """Raised before an oversized task result can be persisted in the database."""
 
 
-def _utc_now(value: datetime | None = None) -> datetime:
-    return value or datetime.now(timezone.utc)
+def database_now(db: Session, value: datetime | None = None) -> datetime:
+    """Use the database clock, including across a long-lived transaction."""
+    if value is not None:
+        return cast(datetime, _normalized(value))
+    clock = func.clock_timestamp() if db.get_bind().dialect.name == "postgresql" else func.current_timestamp()
+    return cast(datetime, _normalized(db.scalar(select(clock))))
+
+
+def _lease_clock(db: Session, current_time: datetime, override: datetime | None = None):
+    # Mutators explicitly lock the row before obtaining their timestamp. Do not
+    # rely on UPDATE predicate re-evaluation after a tuple-lock wait.
+    if override is None and db.get_bind().dialect.name == "postgresql":
+        return func.clock_timestamp()
+    return current_time
+
+
+def _lease_deadline(db: Session, current_time: datetime, seconds: int, override: datetime | None = None):
+    return _lease_clock(db, current_time, override) + timedelta(seconds=max(1, seconds))
 
 
 def _normalized(value: datetime | None) -> datetime | None:
@@ -59,6 +75,20 @@ def _normalized(value: datetime | None) -> datetime | None:
 
 
 class JobService:
+    @staticmethod
+    def _lock_job(db: Session, task_id: str) -> None:
+        # Select only the identifier: refreshing a mapped object here could
+        # discard pending domain/job changes in the caller's transaction.
+        with db.no_autoflush:
+            db.query(JobRecord.task_id).filter(JobRecord.task_id == task_id).with_for_update().first()
+
+    @staticmethod
+    def lock_owner(db: Session, owner_id: int) -> None:
+        # NO KEY UPDATE serializes admission without conflicting with the
+        # foreign-key KEY SHARE locks taken while inserting datasets/jobs.
+        with db.no_autoflush:
+            db.query(User.id).filter(User.id == owner_id).with_for_update(key_share=True).one()
+
     @staticmethod
     def ensure_result_size(result: dict, *, label: str = "Job result") -> None:
         serialized_size = len(
@@ -98,7 +128,7 @@ class JobService:
         if lock_owner:
             # Serializes job admission per account in PostgreSQL. SQLite
             # ignores FOR UPDATE, so local/test concurrency is best-effort.
-            db.query(User.id).filter(User.id == owner_id).with_for_update().one()
+            cls.lock_owner(db, owner_id)
         if (
             cls.active_count(db, owner_id, exclude_task_id=exclude_task_id)
             >= settings.MAX_ACTIVE_JOBS_PER_USER
@@ -130,6 +160,7 @@ class JobService:
             status="PENDING",
             progress=0,
             stage="dispatch_pending",
+            max_attempts=3 if kind in {"transformation", "transformation-preview"} else 4,
         )
         db.add(job)
         return job
@@ -162,15 +193,18 @@ class JobService:
         lease_seconds: int = JOB_LEASE_SECONDS,
         now: datetime | None = None,
     ) -> JobRecord:
-        current_time = _utc_now(now)
         if attempt_token is not None:
-            lease_expires_at = current_time + timedelta(seconds=max(1, lease_seconds))
+            cls._lock_job(db, task_id)
+        current_time = database_now(db, now)
+        if attempt_token is not None:
+            lease_expires_at = _lease_deadline(db, current_time, lease_seconds, now)
             updated = (
                 db.query(JobRecord)
                 .filter(
                     JobRecord.task_id == task_id,
                     JobRecord.status == "STARTED",
                     JobRecord.attempt_token == attempt_token,
+                    JobRecord.lease_expires_at > _lease_clock(db, current_time, now),
                 )
                 .update(
                     {
@@ -213,20 +247,22 @@ class JobService:
         if not attempt_token or len(attempt_token) > 64:
             raise ValueError("A worker attempt token must contain 1 to 64 characters.")
 
-        current_time = _utc_now(now)
+        cls._lock_job(db, task_id)
+        current_time = database_now(db, now)
         lease_seconds = max(1, lease_seconds)
-        lease_expires_at = current_time + timedelta(seconds=lease_seconds)
+        lease_expires_at = _lease_deadline(db, current_time, lease_seconds, now)
         updated = (
             db.query(JobRecord)
             .filter(
                 JobRecord.task_id == task_id,
+                JobRecord.attempt_count < JobRecord.max_attempts,
                 or_(
                     JobRecord.status == "PENDING",
                     and_(
                         JobRecord.status == "STARTED",
                         or_(
                             JobRecord.lease_expires_at.is_(None),
-                            JobRecord.lease_expires_at <= current_time,
+                            JobRecord.lease_expires_at <= _lease_clock(db, current_time, now),
                         ),
                     ),
                 ),
@@ -237,6 +273,7 @@ class JobService:
                     JobRecord.progress: progress,
                     JobRecord.stage: stage,
                     JobRecord.attempt_token: attempt_token,
+                    JobRecord.attempt_count: JobRecord.attempt_count + 1,
                     JobRecord.lease_expires_at: lease_expires_at,
                     JobRecord.started_at: current_time,
                     JobRecord.updated_at: current_time,
@@ -262,10 +299,14 @@ class JobService:
             return existing, False
         if existing.status in CANCELLATION_JOB_STATUSES:
             raise JobCancellationRequested("Job cancellation was requested.")
+        if existing.attempt_count >= existing.max_attempts and (
+            existing.status == "PENDING"
+            or _normalized(existing.lease_expires_at) is None
+            or cast(datetime, _normalized(existing.lease_expires_at)) <= current_time
+        ):
+            raise JobStateConflict("The durable execution attempt budget has been exhausted.")
         if existing.status == "STARTED":
-            current_lease = _normalized(
-                cast(datetime | None, existing.lease_expires_at)
-            )
+            current_lease = _normalized(existing.lease_expires_at)
             remaining = lease_seconds
             if current_lease is not None:
                 remaining = min(
@@ -285,38 +326,45 @@ class JobService:
         progress: int,
         stage: str,
         lease_seconds: int = JOB_LEASE_SECONDS,
+        now: datetime | None = None,
     ) -> None:
-        now = datetime.now(timezone.utc)
+        cls._lock_job(db, task_id)
+        current_time = database_now(db, now)
         updated = (
             db.query(JobRecord)
             .filter(
                 JobRecord.task_id == task_id,
                 JobRecord.status == "STARTED",
                 JobRecord.attempt_token == attempt_token,
+                JobRecord.lease_expires_at > _lease_clock(db, current_time, now),
             )
             .update(
                 {
                     JobRecord.progress: progress,
                     JobRecord.stage: stage,
-                    JobRecord.lease_expires_at: now + timedelta(seconds=max(1, lease_seconds)),
-                    JobRecord.updated_at: now,
+                    JobRecord.lease_expires_at: _lease_deadline(db, current_time, lease_seconds, now),
+                    JobRecord.updated_at: current_time,
                 },
                 synchronize_session=False,
             )
         )
         if updated != 1:
-            cls.ensure_active(db, task_id, attempt_token=attempt_token)
+            cls.ensure_active(db, task_id, attempt_token=attempt_token, now=now)
 
     @classmethod
-    def succeed(cls, db: Session, task_id: str, result: dict, *, attempt_token: str) -> bool:
+    def succeed(
+        cls, db: Session, task_id: str, result: dict, *, attempt_token: str, now: datetime | None = None
+    ) -> bool:
         cls.ensure_result_size(result)
-        now = datetime.now(timezone.utc)
+        cls._lock_job(db, task_id)
+        current_time = database_now(db, now)
         updated = (
             db.query(JobRecord)
             .filter(
                 JobRecord.task_id == task_id,
                 JobRecord.status == "STARTED",
                 JobRecord.attempt_token == attempt_token,
+                JobRecord.lease_expires_at > _lease_clock(db, current_time, now),
             )
             .update(
                 {
@@ -326,8 +374,8 @@ class JobService:
                     JobRecord.result_json: result,
                     JobRecord.error_message: None,
                     JobRecord.lease_expires_at: None,
-                    JobRecord.finished_at: now,
-                    JobRecord.updated_at: now,
+                    JobRecord.finished_at: current_time,
+                    JobRecord.updated_at: current_time,
                 },
                 synchronize_session=False,
             )
@@ -343,18 +391,23 @@ class JobService:
             raise JobCancellationRequested("Job cancellation was requested.")
         if current and current.status == "FAILURE":
             raise JobStateConflict("A failed job cannot be completed by a stale worker attempt.")
-        cls.ensure_active(db, task_id, attempt_token=attempt_token)
+        cls.ensure_active(db, task_id, attempt_token=attempt_token, now=now)
         return False
 
     @staticmethod
     def retry(db: Session, task_id: str, error_message: str, *, attempt_token: str) -> bool:
-        now = datetime.now(timezone.utc)
+        from app.services.outbox_service import OutboxService
+
+        JobService._lock_job(db, task_id)
+        now = database_now(db)
         updated = (
             db.query(JobRecord)
             .filter(
                 JobRecord.task_id == task_id,
                 JobRecord.status == "STARTED",
                 JobRecord.attempt_token == attempt_token,
+                JobRecord.lease_expires_at > _lease_clock(db, now),
+                JobRecord.attempt_count < JobRecord.max_attempts,
             )
             .update(
                 {
@@ -368,6 +421,10 @@ class JobService:
                 synchronize_session=False,
             )
         )
+        if updated == 1:
+            # The caller commits the job transition and its publication intent
+            # together. Celery's retry message is merely an optional duplicate.
+            OutboxService.rearm(db, task_id, now=now)
         return updated == 1
 
     @staticmethod
@@ -378,14 +435,23 @@ class JobService:
         *,
         attempt_token: str | None = None,
         enforce_attempt: bool = False,
+        lease_expired_before: datetime | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc)
+        JobService._lock_job(db, task_id)
+        now = database_now(db)
         query = db.query(JobRecord).filter(
             JobRecord.task_id == task_id,
             JobRecord.status.in_(ACTIVE_JOB_STATUSES),
         )
         if attempt_token is not None or enforce_attempt:
             query = query.filter(JobRecord.attempt_token == attempt_token)
+        if lease_expired_before is not None:
+            query = query.filter(or_(
+                JobRecord.lease_expires_at <= lease_expired_before,
+                JobRecord.lease_expires_at.is_(None),
+            ))
+        elif attempt_token is not None:
+            query = query.filter(JobRecord.lease_expires_at > _lease_clock(db, now))
         updated = query.update(
             {
                 JobRecord.status: "FAILURE",
@@ -405,7 +471,7 @@ class JobService:
             return True
         if job.status in TERMINAL_JOB_STATUSES:
             return False
-        now = datetime.now(timezone.utc)
+        now = database_now(db)
         updated = (
             db.query(JobRecord)
             .filter(
@@ -427,7 +493,7 @@ class JobService:
     @staticmethod
     def cancel_pending(db: Session, task_id: str, result: dict | None = None) -> bool:
         """Atomically cancel work that has not been acquired by a worker."""
-        now = datetime.now(timezone.utc)
+        now = database_now(db)
         updated = (
             db.query(JobRecord)
             .filter(
@@ -458,14 +524,23 @@ class JobService:
         *,
         attempt_token: str | None = None,
         enforce_attempt: bool = False,
+        lease_expired_before: datetime | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc)
+        JobService._lock_job(db, task_id)
+        now = database_now(db)
         query = db.query(JobRecord).filter(
             JobRecord.task_id == task_id,
             JobRecord.status.in_(ACTIVE_JOB_STATUSES | CANCELLATION_JOB_STATUSES),
         )
         if attempt_token is not None or enforce_attempt:
             query = query.filter(JobRecord.attempt_token == attempt_token)
+        if lease_expired_before is not None:
+            query = query.filter(or_(
+                JobRecord.lease_expires_at <= lease_expired_before,
+                JobRecord.lease_expires_at.is_(None),
+            ))
+        elif attempt_token is not None:
+            query = query.filter(JobRecord.lease_expires_at > _lease_clock(db, now))
         updated = query.update(
             {
                 JobRecord.status: "CANCELLED",

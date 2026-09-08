@@ -77,7 +77,13 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   async function undo() {
-    if (dataset) { await undoDatasetTransformation(dataset.id); await refresh(); await loadHistory(); return; }
+    if (dataset) {
+      await undoDatasetTransformation(dataset.id, dataset.version);
+      setPreview(null);
+      await refresh();
+      await loadHistory();
+      return;
+    }
     const previous = localSnapshots[localSnapshots.length - 1];
     if (previous) {
       setRows(previous);

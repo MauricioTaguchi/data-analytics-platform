@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from shutil import disk_usage
 from uuid import uuid4
@@ -69,7 +70,7 @@ class LocalStorage:
                     destination.write(chunk)
             if total_bytes == 0:
                 raise ValueError("The uploaded file is empty.")
-            temporary_path.replace(final_path)
+            self.commit_temporary(temporary_path, final_path)
             return final_path, total_bytes
         except Exception:
             temporary_path.unlink(missing_ok=True)
@@ -80,7 +81,7 @@ class LocalStorage:
 
     def version_path(self, source: Path) -> Path:
         suffix = ".xlsx" if source.suffix.lower() == ".xls" else source.suffix
-        return self.root / f"{source.stem}.v-{uuid4().hex[:10]}{suffix}"
+        return self.root / f"{source.stem}.v-{uuid4().hex}{suffix}"
 
     def temporary_version_path(self, final_path: Path) -> Path:
         # Keep the data format as the final suffix so dataframe writers can
@@ -93,11 +94,29 @@ class LocalStorage:
 
     @staticmethod
     def commit_temporary(temporary_path: Path, final_path: Path) -> None:
+        # Flush bytes before publishing the directory entry. The caller must use
+        # a new immutable final path for each execution attempt.
+        with temporary_path.open("rb") as artifact:
+            os.fsync(artifact.fileno())
         temporary_path.replace(final_path)
+        LocalStorage._sync_directory(final_path.parent)
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        # Windows does not expose directory fsync; deployments use Linux volumes.
+        if os.name == "nt":
+            return
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def delete(path: Path) -> None:
         path.unlink(missing_ok=True)
+        if path.parent.exists():
+            LocalStorage._sync_directory(path.parent)
 
 
 storage = LocalStorage()

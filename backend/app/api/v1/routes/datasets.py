@@ -26,6 +26,7 @@ from app.schemas.dataset import (
     TransformationJobResponse,
     TransformationRequest,
     TransformationResponse,
+    UndoRequest,
 )
 from app.services.dataset_service import (
     DatasetExpansionLimitError,
@@ -295,8 +296,19 @@ def start_profile(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    dataset = owned_dataset(db, dataset_id, user.id)
-    if CacheService.get_json(f"dataset:{dataset.id}:profile") or dataset.profile_json:
+    # Serialize admission with transformation/UNDO before changing dataset state.
+    JobService.lock_owner(db, user.id)
+    dataset = (
+        db.query(Dataset)
+        .join(Project, Project.id == Dataset.project_id)
+        .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None), Project.owner_id == user.id)
+        .execution_options(populate_existing=True)
+        .with_for_update(of=Dataset)
+        .first()
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    if dataset.profile_json:
         return {"task_id": "cached", "status": "SUCCESS", "progress": 100}
 
     active_job = (
@@ -319,6 +331,7 @@ def start_profile(
     try:
         DatasetService.ensure_ready(dataset)
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # Persist the operation-specific state before dispatching the task. In eager
@@ -347,7 +360,9 @@ def get_profile(
     user: User = Depends(get_current_user),
 ):
     dataset = owned_dataset(db, dataset_id, user.id)
-    profile = CacheService.get_json(f"dataset:{dataset.id}:profile") or dataset.profile_json
+    # The profile and revision are published in one database transaction. An
+    # unversioned cache can be repopulated by a delayed worker after a mutation.
+    profile = dataset.profile_json
     if not profile:
         raise HTTPException(status_code=404, detail="Profiling is not available yet.")
     return {"dataset_id": dataset.id, "profile": profile}
@@ -519,6 +534,7 @@ def transform_dataset(
             idempotency_key,
         )
     except (ValueError, KeyError, TypeError) as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if not created and transformation.task_id:
@@ -569,15 +585,19 @@ def transformation_history(
 @router.post("/{dataset_id}/transformations/undo", response_model=TransformationResponse)
 def undo_transformation(
     dataset_id: int,
+    payload: UndoRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     dataset = owned_dataset(db, dataset_id, user.id)
     try:
-        item = DatasetService.undo_last(db, dataset, user.id)
+        item = DatasetService.undo_last(
+            db, dataset, user.id, expected_version=payload.expected_version
+        )
         CacheService.delete(f"dataset:{dataset.id}:profile")
         return item
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

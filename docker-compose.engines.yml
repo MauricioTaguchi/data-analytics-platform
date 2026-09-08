@@ -1,0 +1,7 @@
+# Optional native engines are only needed in the processing worker image.
+services:
+  worker:
+    build:
+      context: ./backend
+      args:
+        INSTALL_OPTIONAL_ENGINES: "true"

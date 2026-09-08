@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
 from app.api.v1.routes import datasets as dataset_routes
@@ -180,9 +181,10 @@ def test_sqlite_migrations_upgrade_and_downgrade_with_legacy_data(
         assert {"job_records", "task_outbox"} <= migrated_tables
         job_columns = {column["name"]: column for column in inspector.get_columns("job_records")}
         assert job_columns["dataset_id"]["nullable"]
+        assert {"attempt_count", "max_attempts"} <= set(job_columns)
         with migration_engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "20260815_0008"
+                ScriptDirectory.from_config(alembic_config).get_current_head()
             )
     finally:
         migration_engine.dispose()
@@ -271,7 +273,8 @@ def test_database_hardening_migration_is_the_single_head():
         if assignments["down_revision"]:
             parent_revisions.add(assignments["down_revision"])
 
-    assert revisions - parent_revisions == {"20260815_0008"}
+    assert len(revisions - parent_revisions) == 1
+    assert parent_revisions <= revisions
 
 
 def test_runtime_image_is_pinned_and_drops_root_privileges():

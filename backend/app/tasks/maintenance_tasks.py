@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import and_, or_
+from sqlalchemy import or_
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -11,7 +11,8 @@ from app.models.report import Report
 from app.models.session import RefreshSession
 from app.models.transformation import Transformation
 from app.services.storage_service import storage
-from app.services.job_service import CANCELLATION_JOB_STATUSES, JobService
+from app.services.artifact_service import ArtifactService
+from app.services.job_service import JobService, database_now
 from app.services.outbox_service import OutboxService
 from app.worker import celery_app
 
@@ -29,6 +30,7 @@ def _reconcile_job_target(db, job: JobRecord, *, cancelled: bool, error_message:
     if job.kind == "import":
         if dataset:
             dataset.status = "cancelled" if cancelled else "failed"
+            ArtifactService.schedule_delete(db, Path(dataset.stored_path))
             if cancelled:
                 dataset.deleted_at = datetime.now(timezone.utc)
         return
@@ -56,7 +58,40 @@ def _reconcile_job_target(db, job: JobRecord, *, cancelled: bool, error_message:
         if report and report.status not in {"completed", "cancelled"}:
             report.status = "cancelled" if cancelled else "failed"
             report.error_message = None if cancelled else error_message
+            if report.file_path:
+                ArtifactService.schedule_delete(db, Path(report.file_path))
             report.file_path = None
+
+
+def _reconcile_jobs(db, limit: int = 100) -> list[JobRecord]:
+    outcomes = OutboxService.reconcile(db, limit=limit)
+    terminal = []
+    for task_id in outcomes["failed"]:
+        job = JobService.get(db, task_id)
+        if job:
+            _reconcile_job_target(db, job, cancelled=False, error_message=job.error_message or "Retry budget exhausted.")
+            terminal.append(job)
+    now = database_now(db)
+    cancellations = (db.query(JobRecord)
+        .execution_options(populate_existing=True)
+        .filter(JobRecord.status == "CANCELLATION_REQUESTED", or_(
+            JobRecord.lease_expires_at <= now, JobRecord.lease_expires_at.is_(None)))
+        .order_by(JobRecord.task_id).with_for_update(skip_locked=True).limit(limit).all())
+    for job in cancellations:
+        if JobService.cancel(db, job.task_id, attempt_token=job.attempt_token,
+                             enforce_attempt=True, lease_expired_before=now):
+            OutboxService.cancel(db, job.task_id)
+            _reconcile_job_target(db, job, cancelled=True, error_message="")
+            terminal.append(job)
+    return terminal
+
+
+def reconcile_jobs():
+    """Run directly from the scheduler; recovery does not require broker delivery."""
+    with SessionLocal() as db:
+        terminal = _reconcile_jobs(db)
+        db.commit()
+        return {"status": "completed", "terminal": len(terminal)}
 
 
 @celery_app.task(name="auth.remove_expired_refresh_sessions", soft_time_limit=60, time_limit=90)
@@ -106,62 +141,14 @@ def remove_orphaned_storage_files(grace_hours: int = 24):
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=max(grace_hours, 1))
         stale_message = "Reconciled after the dispatch or worker lease expired."
-        datasets = db.query(Dataset).all()
 
-        lease_expired = or_(
-            JobRecord.lease_expires_at <= now,
-            and_(
-                JobRecord.lease_expires_at.is_(None),
-                JobRecord.updated_at < cutoff,
-            ),
-        )
-        stale_jobs = db.query(JobRecord).filter(
-            or_(
-                and_(JobRecord.status == "PENDING", JobRecord.updated_at < cutoff),
-                and_(
-                    JobRecord.status.in_({"STARTED", "CANCELLATION_REQUESTED"}),
-                    lease_expired,
-                ),
-            )
-        )
-
-        reconciled_jobs = 0
-        reconciled_job_transformations: set[int] = set()
-        reconciled_job_reports: set[int] = set()
-        reconciled_job_datasets: set[int] = set()
-        for job in stale_jobs:
-            cancelled = job.status in CANCELLATION_JOB_STATUSES
-            if cancelled:
-                transitioned = JobService.cancel(
-                    db,
-                    job.task_id,
-                    attempt_token=job.attempt_token,
-                    enforce_attempt=True,
-                )
-            else:
-                transitioned = JobService.fail(
-                    db,
-                    job.task_id,
-                    stale_message,
-                    attempt_token=job.attempt_token,
-                    enforce_attempt=True,
-                )
-            if not transitioned:
-                continue
-            OutboxService.cancel(db, job.task_id)
-            _reconcile_job_target(
-                db,
-                job,
-                cancelled=cancelled,
-                error_message=stale_message,
-            )
-            reconciled_jobs += 1
-            if job.kind in {"import", "profile", "transformation"}:
-                reconciled_job_datasets.add(job.dataset_id)
-            if job.transformation_id:
-                reconciled_job_transformations.add(job.transformation_id)
-            if job.report_id:
-                reconciled_job_reports.add(job.report_id)
+        terminal_jobs = _reconcile_jobs(db)
+        db.flush()
+        reconciled_jobs = len(terminal_jobs)
+        reconciled_job_transformations = {job.transformation_id for job in terminal_jobs if job.transformation_id}
+        reconciled_job_reports = {job.report_id for job in terminal_jobs if job.report_id}
+        reconciled_job_datasets = {job.dataset_id for job in terminal_jobs
+                                  if job.kind in {"import", "profile", "transformation"}}
 
         active_jobs = db.query(JobRecord).filter(
             JobRecord.status.in_({"PENDING", "STARTED", "CANCELLATION_REQUESTED"})
@@ -207,6 +194,7 @@ def remove_orphaned_storage_files(grace_hours: int = 24):
                 report.file_path = None
                 reconciled_reports += 1
 
+        datasets = db.query(Dataset).execution_options(populate_existing=True).all()
         reconciled_datasets = 0
         for dataset in datasets:
             if dataset.id in reconciled_job_datasets:
@@ -227,7 +215,7 @@ def remove_orphaned_storage_files(grace_hours: int = 24):
         referenced = {
             str(Path(dataset.stored_path).resolve())
             for dataset in datasets
-            if dataset.stored_path and dataset.status != "cancelled" and dataset.deleted_at is None
+            if dataset.stored_path and dataset.status not in {"cancelled", "failed"} and dataset.deleted_at is None
         }
         for transformation in transformations:
             if transformation.input_path:
@@ -244,9 +232,11 @@ def remove_orphaned_storage_files(grace_hours: int = 24):
             if report.status == "completed" and report.file_path:
                 referenced.add(str(Path(report.file_path).resolve()))
 
+        referenced.update(ArtifactService.managed_paths(db))
         db.commit()
 
-        removed = []
+        managed_cleanup = ArtifactService.cleanup()
+        removed = list(managed_cleanup["removed"])
         for root in {storage.root, Path(settings.REPORT_DIR)}:
             root.mkdir(parents=True, exist_ok=True)
             for path in root.iterdir():

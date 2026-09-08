@@ -4,7 +4,7 @@ This runbook describes the signals the repository exposes and the checks an oper
 
 ## Runtime topology
 
-The local Compose stack runs separate API, worker, scheduler, PostgreSQL, Redis, and frontend containers. The included Render blueprint intentionally uses a smaller single-instance topology: the API, Celery worker, and Celery beat processes share one service and one persistent disk.
+The local Compose stack runs separate API, worker, scheduler, PostgreSQL, Redis, and frontend containers. The scheduler runs `python -m app.scheduler` directly and can start once PostgreSQL and migrations are ready, without waiting for Redis. The included Render blueprint intentionally uses a smaller single-instance topology: the API, Celery worker, and recovery scheduler processes share one service and one persistent disk.
 
 Do not add independent API or worker replicas while `LocalStorage` is active. The local disk is not shared across service instances. Use an S3-compatible storage implementation before horizontal scaling.
 
@@ -20,11 +20,22 @@ Production readiness requires Redis. Development and test may report the bounded
 
 `/health/ready` does not currently prove that a Celery worker is consuming jobs or that versioned storage is writable. Monitor worker heartbeats, queue age, and disk health separately.
 
+The scheduler has an independent process check:
+
+```bash
+docker compose exec scheduler python -m app.scheduler --healthcheck
+docker compose exec scheduler cat /tmp/dataflow-scheduler-health.json
+```
+
+Exit code zero means its heartbeat is fresh and the scheduler process exists. This is a liveness check, not a guarantee that PostgreSQL or Redis is available. The heartbeat includes each activity's `last_success`, `last_failure`, and `running` state; timestamps are Unix seconds. During an outage, failures are logged and the activity retries while other activities continue. If a thread stops or exceeds its runtime deadline, the scheduler exits and the process supervisor restarts it. A fresh process heartbeat alone should never replace monitoring outbox age and per-activity progress.
+
+Job reconciliation and outbox dispatch run every 10 seconds after the preceding execution finishes. Storage and expired-session cleanup run hourly, and terminal-history cleanup runs daily. Activities also run when the scheduler starts. PostgreSQL claim tokens fence overlapping dispatchers and job reconciliation; a single scheduler leader is not required. Replicas running filesystem maintenance must access the same storage.
+
 ## Logs and correlation
 
 The API emits a JSON `http_request` event with request ID, method, path, status, and duration. It also returns `X-Request-ID`. Clients and reverse proxies should preserve that header so an application error can be correlated across systems.
 
-Celery emits worker and scheduler logs to standard output. The included single-container Render entrypoint exits when any required API, worker, or scheduler process dies, allowing the platform to restart the whole unit. A deployment should centralize API and Celery logs, redact secrets and uploaded content, apply retention, and attach service/revision/environment fields at ingestion.
+Celery emits worker logs, and the recovery scheduler emits activity failures and watchdog errors through Python logging. Container runtimes capture these streams. The included single-container Render entrypoint exits when any required API, worker, or scheduler process dies, allowing the platform to restart the whole unit. A deployment should centralize application logs, redact secrets and uploaded content, apply retention, and attach service/revision/environment fields at ingestion.
 
 The current repository does not export metrics or traces. At minimum, production operators should add alerts for:
 
@@ -63,7 +74,7 @@ Check the Redis service, connection string, authentication, and memory state. Pr
 
 ### Jobs stay queued or processing
 
-Check worker heartbeat/logs, Redis broker availability, outbox age, queue age, and resource limits. Pending outbox records are retried automatically. A lost worker can redeliver late-acknowledged tasks; execution leases, request fingerprints, and the current dataset version prevent an unsafe duplicate commit.
+Check worker heartbeat/logs, scheduler activity progress, Redis broker availability, outbox age, queue age, and resource limits. Pending outbox records are retried automatically. The database reconciler also recovers expired worker leases and published messages that never started, subject to retry budgets. It continues operating when the broker is unavailable, and publication resumes after Redis recovers. Late deliveries must reacquire a valid execution lease; attempt tokens and the monotonic dataset revision prevent a stale commit. Do not start Celery beat as a replacement for `python -m app.scheduler`.
 
 ### Persistent disk approaches capacity
 

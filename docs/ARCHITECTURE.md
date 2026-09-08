@@ -3,7 +3,7 @@
 ## System overview
 
 ```mermaid
-flowchart LR
+flowchart TD
     U["User"] --> W["React + TypeScript"]
     W --> A["FastAPI"]
     A --> P[("PostgreSQL")]
@@ -11,7 +11,8 @@ flowchart LR
     A --> R[("Redis")]
     A --> F[("Versioned storage")]
     A --> C["Celery worker"]
-    B["Celery beat"] --> O
+    B["Recovery scheduler"] --> O
+    B --> P
     O --> C
     C --> P
     C --> R
@@ -26,7 +27,7 @@ flowchart LR
 - **PostgreSQL:** users, refresh sessions, projects, datasets, transformations, dashboards, charts, reports, durable jobs, and the transactional task outbox.
 - **Redis:** shared cache, rate-limit counters, Celery broker, and transient task results.
 - **Celery worker:** import validation, profiling, transformations, and PDF generation outside API requests.
-- **Celery beat:** scheduled outbox dispatch, expired-session cleanup, and orphan-file reconciliation.
+- **Recovery scheduler:** a standalone `python -m app.scheduler` process that directly reconciles database leases, dispatches the outbox, and runs storage/session/history cleanup. Its execution does not depend on receiving a Celery task through Redis.
 - **Alembic:** the only production schema-management path.
 - **Versioned storage:** immutable dataset outputs and generated reports behind a replaceable boundary.
 
@@ -49,9 +50,11 @@ stateDiagram-v2
 
 ## Consistency model
 
-Every transformation carries the dataset version observed by the client. A conditional database update advances that version only when both the version and active file pointer still match. Output is first written outside a database transaction through a capacity-guarded temporary stream that enforces the expanded-size, quota snapshot, and free-disk limits before each write. A short final transaction then locks the account and durable job, revalidates the authoritative quota/version/lease, atomically renames the file, and advances the pointer. Normal failures remove temporary/final output and mark the job and domain state consistently; a scheduled sweep removes old unreferenced files after a grace period.
+Every transformation carries the dataset revision observed by the client. A conditional database update advances that revision only when both the revision and active file pointer still match. Undo advances the revision too, so returning to older content cannot make a stale mutation current again. Output paths are unique to each attempt and registered durably before writing. A short final transaction revalidates the account quota, job lease, dataset revision, and artifact reservation before publishing the new pointer. Job success and artifact publication commit with the domain state. Filesystem writes and PostgreSQL do not share an atomic commit: unresolved attempts and terminal cleanup requests remain in the artifact registry for idempotent collection, including when the commit acknowledgement is lost.
 
-Domain state, the durable job record, and its outbox event are committed in one database transaction. Immediate dispatch is attempted after commit. When the broker is unavailable or the API process exits at the hand-off boundary, Celery beat retries the persisted event with a claim lease and bounded exponential backoff. Workers use their own renewable execution lease so late delivery and worker loss remain recoverable without applying a completed task twice.
+Domain state, the durable job record, and its outbox event are committed in one database transaction. Immediate dispatch is attempted after commit. When the broker is unavailable or the API process exits at the hand-off boundary, the independent scheduler retries the persisted event with a claim token, a lease, and bounded backoff. A separate scheduler activity recovers expired worker leases and missing deliveries through PostgreSQL, even while Redis is down. Retry budgets bound repeated execution. Publication acknowledgement does not prove task execution; durable job state remains authoritative.
+
+Dispatch, job reconciliation, and periodic cleanup execute in separate scheduler threads with separate database sessions. A blocked broker call cannot occupy the reconciliation thread. Dependency failures are logged and retried; stalled activities exceed a watchdog deadline and terminate the scheduler so its process supervisor can restart it. Outbox and job claims are fenced in PostgreSQL, so overlapping scheduler instances do not require a Redis leader lock. Storage cleanup replicas still require access to the same versioned storage.
 
 Import is the one intentional two-phase admission path. An outer ASGI guard checks declared and received request bytes, shared upload rate limits, a read-only active-job precheck, and a process-local receive slot while FastAPI parses multipart content. Once that bounded parser step finishes, the route reserves an owned job ID before copying and validating the `UploadFile` spool into versioned storage, attaching the dataset, and committing its outbox event. The locked reservation remains authoritative because the precheck is intentionally race-prone. Cancellation and monitoring can observe the storage-staging phase, but not the earlier network receive/parser phase. A failed or interrupted staging attempt leaves a terminal job record and no referenced dataset file.
 
