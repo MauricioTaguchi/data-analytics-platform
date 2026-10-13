@@ -97,6 +97,8 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install application dependencies
         run: pnpm install --frozen-lockfile
+      - name: Audit frontend dependencies
+        run: pnpm audit --audit-level=low
       - name: Lint and type-check frontend
         run: pnpm exec eslint src e2e && pnpm typecheck
       - name: Run frontend tests with coverage
