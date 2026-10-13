@@ -30,7 +30,7 @@ Upload, inspect, transform, undo, and publish analytics from one workspace.
 
 The frontend starts with sample data and a guided tour. No account or backend is required to explore the workspace. Demo changes are kept in memory and are not persisted.
 
-Requirements: Node.js 22 and the pnpm version declared in `frontend/package.json`.
+Requirements: Node.js 22.12 or a newer supported LTS release, and the pnpm version declared in `frontend/package.json`.
 
 ```bash
 git clone https://github.com/MauricioTaguchi/data-analytics-platform.git

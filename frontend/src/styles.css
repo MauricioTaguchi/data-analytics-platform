@@ -123,9 +123,9 @@
 .metric-card > small { grid-area: 3 / 1 / 4 / 3; margin-top: 10px; font-size: 10px; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: var(--background); }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button, .file-button { cursor: pointer; }
-button:focus-visible, input:focus-visible, select:focus-visible, .file-button:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, .file-button:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .app-shell { min-height: 100vh; }
 button, .file-button { border-radius: 8px; border: 1px solid transparent; padding: 10px 14px; font-weight: 650; font-size: 13px; display: inline-flex; align-items: center; justify-content: center; }
 .primary { background: var(--primary); color: #fff; border-color: var(--blue); }
@@ -166,7 +166,8 @@ td { color: var(--muted); }
 .operation-list button { justify-content: flex-start; border: 0; background: transparent; color: var(--muted); font-weight: 500; padding: 9px 10px; }
 .operation-list button.selected { background: var(--info-bg); color: var(--info); }
 .operation-config { padding: 20px; }.operation-config > span { color: var(--muted); font-size: 11px; }.operation-config h3 { margin: 4px 0 5px; font-size: 17px; }.operation-config > p { color: var(--muted); font-size: 12px; }
-.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }.field-row label { color: var(--text); font-size: 11px; font-weight: 650; }.field-row input, .field-row select { display: block; width: 100%; margin-top: 6px; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); color: var(--text); font-size: 12px; }
+.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }.field-row label { color: var(--text); font-size: 11px; font-weight: 650; }
+.field-row input, .field-row select, .operation-fields input:not([type="checkbox"]):not([type="radio"]), .operation-fields select, .operation-fields textarea, .engine-field select { display: block; width: 100%; min-width: 0; margin-top: 6px; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--background); color: var(--text); font-size: 12px; }
 .button-row { display: flex; justify-content: flex-end; gap: 8px; }.button-row button { min-width: 130px; }
 .comparison-card { min-height: 190px; }.comparison { display: grid; grid-template-columns: 1fr auto 1fr 1.2fr; gap: 14px; align-items: center; padding: 18px; }.comparison > div:not(.comparison-arrow) { border: 1px solid var(--border); padding: 13px; display: grid; gap: 5px; }.comparison span, .comparison small { color: var(--muted); font-size: 10px; }.comparison strong { font-size: 17px; }.comparison-arrow { color: var(--blue); font-size: 22px; }.comparison .impact { background: var(--surface-raised); }
 .empty-state { min-height: 125px; display: grid; place-content: center; text-align: center; gap: 5px; color: var(--muted); }.empty-state strong { color: var(--text); font-size: 13px; }.empty-state span { font-size: 11px; }
@@ -444,7 +445,7 @@ input::placeholder { color: var(--muted); opacity: 1; }
 .engine-field small, .operation-fields small { color: var(--muted); line-height: 1.5; }
 .parameter-row { flex-wrap: wrap; margin-bottom: 12px; }
 .parameter-row label { min-width: 110px; flex: 1; }
-.operation-fields textarea { width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--text); font: inherit; }
+.operation-fields textarea { resize: vertical; }
 .operation-fields pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
 .column-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 18px 0; }
 .column-checklist label, .operation-fields .checkbox-label { flex-direction: row; align-items: center; overflow-wrap: anywhere; }
