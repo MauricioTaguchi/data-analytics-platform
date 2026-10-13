@@ -10,7 +10,7 @@ async function openMenu(page: Page) {
 
 async function openSection(page: Page, name: string) {
   await openMenu(page);
-  await page.getByRole("button", { name }).click();
+  await page.getByRole("navigation", { name: "Workspace", exact: true }).getByRole("button", { name, exact: true }).click();
 }
 
 liveTest("authenticated workflow persists transformations and undo before dashboard and PDF report", async ({ page }) => {
@@ -56,7 +56,7 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(initialPreviewResponse.ok()).toBe(true);
   const initialPreview = await initialPreviewResponse.json();
 
-  await openSection(page, "03 Transformations");
+  await openSection(page, "Transformations");
   await page.getByRole("button", { name: "Rename column", exact: true }).click();
   await page.getByLabel(/^Column/).selectOption("customer");
   await page.getByLabel("Parameter", { exact: true }).fill("customer_name");
@@ -101,11 +101,11 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(restoredPreviewResponse.ok()).toBe(true);
   expect(await restoredPreviewResponse.json()).toEqual(initialPreview);
 
-  await openSection(page, "04 Dashboards");
+  await openSection(page, "Dashboards");
   await page.getByRole("button", { name: "Build chart" }).click();
   await expect(page.getByRole("img", { name: "Generated data chart" })).toBeVisible();
 
-  await openSection(page, "05 Reports");
+  await openSection(page, "Reports");
   await page.getByRole("button", { name: "Generate PDF" }).click();
   await expect(page.getByText("The PDF report is ready to download.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Download" }).first()).toBeEnabled();

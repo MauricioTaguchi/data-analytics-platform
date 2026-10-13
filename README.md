@@ -1,4 +1,10 @@
-# DataFlow — Data Analytics Platform
+<div align="center">
+
+# DataFlow
+
+### From raw data to clear decisions. Every transformation has a history.
+
+Upload, inspect, transform, undo, and publish analytics from one workspace.
 
 [![CI](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/codeql.yml/badge.svg)](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/codeql.yml)
@@ -6,49 +12,95 @@
 [![React](https://img.shields.io/badge/React-18-149ECA)](https://react.dev/)
 [![License](https://img.shields.io/badge/license-MIT-0E9384)](LICENSE)
 
-DataFlow is a production-minded analytics workspace that moves a dataset from ingestion to a decision-ready dashboard or PDF report. It makes data quality, background processing, version conflicts, lineage, and operational status visible instead of hiding them behind isolated API calls.
+[Quick start](#quick-start) · [Workspace](#the-workspace) · [Engineering](#engineering-with-evidence) · [Architecture](#architecture) · [Documentation](#documentation)
 
-> **Project status:** this is a portfolio/reference implementation, not a claim of proven production readiness. It demonstrates production-minded boundaries and failure handling, while managed object storage, tested backup restoration, high availability, centralized telemetry, formal service objectives, and an independent security review remain deployment responsibilities. See [Known limitations](docs/LIMITATIONS.md).
+![DataFlow analytics workspace showing the built-in demo](docs/assets/dashboard-preview.png)
 
-![Dashboard preview](docs/assets/dashboard-preview.png)
+</div>
 
-## Product workflow
+**DataFlow is a data analytics platform built around traceable, reversible work.** Analysts can explore data quality, preview changes, build dashboards, and generate reports. The backend makes dataset revisions, background jobs, audit events, and recovery explicit, so the same workflow can be inspected and tested beyond the interface.
 
-1. Upload CSV, Excel, JSON, or Parquet with streamed size validation.
-2. Import and validate the file in a Celery worker with progress and cancellation.
-3. Inspect its schema, preview, missing values, duplicates, correlations, and outliers.
-4. Preview a transformation and submit it with an expected version and idempotency key.
-5. Track the background transformation, inspect lineage, and undo a completed version.
-6. Build persisted charts and interactive dashboards.
-7. Generate a PDF data-quality report or export the current dataset version.
+> **Project status:** a portfolio/reference implementation with implemented failure handling and tested boundaries. Production readiness still requires managed storage, tested backup restoration, high availability, centralized telemetry, formal service objectives, and an independent security review. See [Known limitations](docs/LIMITATIONS.md).
 
-The React application includes a safe local demo, so a reviewer can evaluate the UX without credentials. Connecting the live API enables PostgreSQL persistence, Redis-backed coordination, rotating sessions, workers, dashboards, and reports.
+## Quick start
 
-## Engineering highlights
+### Explore the local demo
 
-| Engineering problem | Implemented boundary | Evidence |
+The frontend starts with sample data and a guided tour. No account or backend is required to explore the workspace. Demo changes are kept in memory and are not persisted.
+
+Requirements: Node.js 22 and the pnpm version declared in `frontend/package.json`.
+
+```bash
+git clone https://github.com/MauricioTaguchi/data-analytics-platform.git
+cd data-analytics-platform/frontend
+corepack enable
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Open `http://localhost:5173`. Try a transformation, inspect its lineage, and undo it before exploring dashboards and reports.
+
+### Run the complete platform
+
+Requirements: Docker Desktop and Docker Compose. From the repository root:
+
+```bash
+cp backend/.env.example backend/.env
+docker compose up --build
+```
+
+| Service | Local address |
+| --- | --- |
+| Product | `http://localhost:5173` |
+| Interactive API documentation | `http://localhost:8000/docs` |
+| Readiness check | `http://localhost:8000/health/ready` |
+
+Create an account through the application to use the live API. PostgreSQL persists projects, revisions, jobs, charts, and dashboards; Redis supports coordination and task delivery; shared volumes retain dataset snapshots and reports. The [sample sales dataset](docs/sample-data/sales.csv) provides a small starting point for the upload workflow.
+
+The one-shot migration service must finish successfully before the API, worker, or scheduler starts. The worker executes jobs; the independent scheduler dispatches pending outbox records and reconciles stale artifacts. For hosted installations and upgrades, follow the [deployment guide](docs/DEPLOYMENT.md) and [recovery procedure](docs/PROCESSING_RECOVERY.md).
+
+## The workspace
+
+| Workspace | What you can do |
+| --- | --- |
+| **Overview** | Review the active dataset, quality indicators, and recent work. |
+| **Datasets** | Upload CSV, Excel, JSON, or Parquet; inspect schema and paginated records. |
+| **Transformations** | Preview an operation, apply it against an expected version, inspect lineage, and undo completed changes. |
+| **Dashboards** | Build persisted charts and interactive dashboards from your datasets. |
+| **Reports** | Generate PDF data-quality reports and download completed outputs. |
+| **Monitoring** | Inspect processing status, progress, and operational feedback. |
+
+### A complete data workflow
+
+1. **Ingest:** stream an upload through size validation and import it in a worker with progress and cancellation.
+2. **Understand:** inspect types, missing values, duplicates, correlations, and outliers before changing the data.
+3. **Preview:** materialize a transformation through the selected engine without publishing a new dataset revision.
+4. **Apply:** submit an expected revision and idempotency key; follow the asynchronous job through completion.
+5. **Verify or undo:** inspect committed events and restore previous content while the revision number keeps increasing.
+6. **Share:** build a dashboard, export the current dataset, or generate a PDF quality report.
+
+New transformation outputs use Parquet to preserve column types. Original uploads and historical snapshots remain available for undo. Parquet pagination reads only requested columns and relevant row groups; profiling and chart aggregation still have bounded, eager processing paths.
+
+## Engineering with evidence
+
+The implementation focuses on failure modes that appear when a data workflow crosses HTTP, a queue, a database, and file storage.
+
+| Engineering problem | Implemented behavior | Evidence |
 | --- | --- | --- |
-| Concurrent writes and undo | Monotonic revisions, conditional publication and PostgreSQL locks | [Concurrency tests](backend/tests/test_dataset_concurrency.py) |
-| Lost undo responses and expired jobs | Transactional audit events and immutable retry receipts | [Audit receipt tests](backend/tests/test_dataset_audit_receipts.py) |
-| Broker outage or lost worker | Transactional outbox, leased attempts and an independent recovery scheduler | [Recovery tests](backend/tests/test_outbox_recovery.py) |
-| Filesystem and database have no shared transaction | Immutable attempt paths, durable reservations and repeatable collection | [Publication tests](backend/tests/test_transformation_publication.py), [artifact tests](backend/tests/test_artifact_lifecycle.py) |
-| Different processing engines | Typed operation contracts, capability preflight and output checks | [Engine contract tests](backend/tests/test_transformation_engines.py) |
-| Failure between durable writes | Real process termination, broker interruption and independent recovery | [Process integration tests](backend/integration/test_process_recovery.py) |
+| Concurrent transformation and undo | Monotonic revisions, conditional publication, and PostgreSQL locks prevent stale publication. | [Concurrency tests](backend/tests/test_dataset_concurrency.py) |
+| A response is lost after undo commits | Transactional audit events retain immutable receipts so the same request can be retried. | [Audit receipt tests](backend/tests/test_dataset_audit_receipts.py) |
+| The broker is unavailable or a worker disappears | A transactional outbox, leased attempts, bounded backoff, and a separate scheduler recover committed work. | [Recovery tests](backend/tests/test_outbox_recovery.py) |
+| File publication and database commit fail separately | Immutable attempt paths, durable reservations, and repeatable collection reconcile unreferenced artifacts. | [Publication tests](backend/tests/test_transformation_publication.py), [artifact tests](backend/tests/test_artifact_lifecycle.py) |
+| Engines disagree about operations or types | Typed parameter contracts, capability preflight, checked casts, and output verification reject unsupported semantics. | [Operation catalog](backend/app/services/operations.py), [engine tests](backend/tests/test_transformation_engines.py) |
+| Retries conceal real process failures | Integration tests terminate processes, interrupt broker access, and deliver duplicate messages using real services. | [Process integration tests](backend/integration/test_process_recovery.py) |
 
-- Functional Overview, Datasets, Transformations, Dashboards, Reports, and Monitoring workspaces
-- Responsive React + TypeScript interface with desktop and mobile Playwright journeys
-- FastAPI routes with tenant isolation and consistent problem responses
-- Pre-parser upload admission with declared/streamed request limits, per-process spool concurrency, preflight job/rate checks, and chunked storage validation
-- A separate 1 MiB pre-parser body limit for non-upload JSON/form requests, including bodies sent without `Content-Length`
-- Capacity-guarded transformation output, per-account quotas, expansion checks, and asynchronous import, profiling, transformation, and report generation
-- Optimistic dataset versions, request-fingerprinted idempotency keys, explicit job leases, compensating file cleanup, and undo
-- Transactional task outbox with bounded backoff so committed work survives broker or process outages
-- Rotating refresh tokens with single-use server sessions and logout revocation
-- PostgreSQL-backed job ownership and concurrency limits plus Redis-backed cache, broker, and multi-instance authentication/upload rate limiting
-- Bounded TTL fallback only in local/test environments; Redis is mandatory in production
-- PostgreSQL, Alembic-only schema management, Celery, Redis, and versioned file storage
-- Ruff, MyPy, ESLint, backend and targeted frontend coverage thresholds, dependency review, Dependabot, and CodeQL
-- Scheduled outbox dispatch, expired-session cleanup, orphan-file reconciliation, and bounded job-history retention
+### Capacity, isolation, and security
+
+- **Bounded admission:** declared and streamed upload limits, per-process spool concurrency, preflight job/rate checks, and chunked storage validation. Non-upload JSON/form requests have a separate 1 MiB pre-parser body limit, including requests without `Content-Length`.
+- **Bounded execution:** per-account storage quotas, expansion checks, guarded transformation outputs, PostgreSQL-backed job ownership and concurrency limits, and worker container resource limits.
+- **Account boundaries:** tenant isolation on API access, rotating refresh tokens with single-use server sessions, logout revocation, and consistent problem responses.
+- **Shared coordination:** Redis-backed cache, broker, and multi-instance authentication/upload rate limits. Bounded TTL fallback is restricted to local/test environments; Redis is required in production.
+- **Lifecycle management:** Alembic-only schema changes, expired-session cleanup, orphan-file reconciliation, and bounded job-history retention.
 
 ## Architecture
 
@@ -65,31 +117,16 @@ flowchart TD
     W --> F
 ```
 
-Transformation rules are separated from publication. The current storage implementation still uses local paths, rename and fsync; an object-storage adapter also needs an artifact-reference and local-materialization boundary. See [Architecture](docs/ARCHITECTURE.md) and [Architecture decisions](docs/DECISIONS.md).
+Transformation rules are separated from publication. Adapters consume a snapshot, transformation plan, and resource policy; the service layer owns leases, revisions, audit events, and transactions. Pandas is the default for bounded workloads. Optional Polars and DuckDB adapters execute supported Parquet projections in supervised subprocesses.
 
-## Run locally
-
-Requirements: Docker Desktop and Docker Compose.
-
-```bash
-cp backend/.env.example backend/.env
-docker compose up --build
-```
-
-Open:
-
-- Product: `http://localhost:5173`
-- OpenAPI: `http://localhost:8000/docs`
-- Readiness: `http://localhost:8000/health/ready`
-
-The one-shot migration service must finish successfully before the API, worker, or scheduler starts. The worker processes jobs, while the scheduler dispatches pending outbox records and removes stale, unreferenced files.
+The current storage implementation uses local paths, rename, and fsync. Moving to object storage requires an artifact-reference and local-materialization boundary as well as an adapter. See [Architecture](docs/ARCHITECTURE.md), [Architecture decisions](docs/DECISIONS.md), and [Adding transformations and engines](CONTRIBUTING.md#adding-transformations-and-engines).
 
 ## Test and verify
 
 ```bash
 cd backend
-python -m pip install -r requirements-dev.txt
-python -m ruff check app tests
+python -m pip install -r requirements-dev.txt -r requirements-engines.txt
+python -m ruff check app tests integration
 python -m mypy app/core app/services/storage_service.py app/schemas
 python -m pytest --cov=app --cov-fail-under=70
 
@@ -103,60 +140,70 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-The fast suite uses eager task execution; PostgreSQL-specific tests run against a real database in CI. A separate process integration job runs API, Redis delivery, Celery workers and recovery schedulers without eager mode. CI also validates migrations, dependency audits, lint, type checks and frontend journeys. Configured coverage thresholds are gates, not measured capacity claims.
+| Validation layer | What it verifies |
+| --- | --- |
+| Backend tests | Operation contracts, data quality, immutable source data, publication, idempotency, quotas, and API behavior. |
+| PostgreSQL tests | Locking and concurrency behavior against a real database in CI. |
+| Process integration | API restart, publisher network interruption, duplicate delivery, and worker death after file rename, with eager mode disabled. |
+| Frontend and browser tests | Request recovery and desktop/mobile workflows, including a live upload-to-undo journey. |
+| Repository checks | Migrations, lint, type checks, backend and targeted frontend coverage gates, dependency audits/review, and CodeQL. |
 
-New transformation outputs use Parquet to retain column types; original uploads and historical snapshots remain available for undo. A preview materializes through the selected adapter before returning a sample. It does not mutate the dataset. Parquet dataset pagination reads only the requested columns and relevant row groups.
+The fast backend suite uses eager task execution. The process suite requires disposable PostgreSQL and Redis services and must be run explicitly; see [Real process integration](CONTRIBUTING.md#real-process-integration). A skipped process suite does not verify recovery. Coverage thresholds are quality gates, not capacity benchmarks.
 
 ## Core API workflow
 
-- `POST /api/v1/datasets/project/{project_id}` — stream an upload and enqueue import
-- `GET /api/v1/datasets/jobs/{task_id}` — inspect progress and result
-- `DELETE /api/v1/datasets/jobs/{task_id}` — cancel an owned job
-- `GET /api/v1/datasets/{dataset_id}/preview` — read a paginated preview
-- `POST /api/v1/datasets/{dataset_id}/profile` — enqueue profiling
-- `POST /api/v1/datasets/{dataset_id}/transform/preview` — enqueue a dry-run against an expected version
-- `POST /api/v1/datasets/{dataset_id}/transform` — enqueue an idempotent transformation
-- `POST /api/v1/datasets/{dataset_id}/transformations/undo` — restore previous content with `{"expected_version": 3}`; the revision keeps increasing
-- `GET /api/v1/datasets/{dataset_id}/events` — inspect committed transformation and undo events
-- `GET /api/v1/datasets/operations` — discover typed parameters and engine capabilities
-- `POST /api/v1/dashboards` and `/dashboards/{id}/charts` — create persisted visualizations
-- `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` — enqueue a PDF report
-- `DELETE /api/v1/reports/{report_id}` — remove a terminal report and release its storage
+All dataset and job operations below enforce ownership. Interactive request and response schemas are available at `/docs` on a running API.
 
-Authentication supports registration, login, automatic refresh-token rotation, and logout/revocation.
+| Action | Endpoint |
+| --- | --- |
+| Upload and enqueue import | `POST /api/v1/datasets/project/{project_id}` |
+| Inspect progress and result | `GET /api/v1/datasets/jobs/{task_id}` |
+| Cancel an owned job | `DELETE /api/v1/datasets/jobs/{task_id}` |
+| Read a paginated preview | `GET /api/v1/datasets/{dataset_id}/preview` |
+| Enqueue profiling | `POST /api/v1/datasets/{dataset_id}/profile` |
+| Preview a transformation | `POST /api/v1/datasets/{dataset_id}/transform/preview` |
+| Enqueue an idempotent transformation | `POST /api/v1/datasets/{dataset_id}/transform` |
+| Restore previous content | `POST /api/v1/datasets/{dataset_id}/transformations/undo` |
+| Read committed transformation and undo events | `GET /api/v1/datasets/{dataset_id}/events` |
+| Discover typed operations and engine capabilities | `GET /api/v1/datasets/operations` |
+| Create a dashboard | `POST /api/v1/dashboards` |
+| Add a chart | `POST /api/v1/dashboards/{id}/charts` |
+| Enqueue a PDF report | `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` |
+| Remove a terminal report and release storage | `DELETE /api/v1/reports/{report_id}` |
+
+Undo accepts a body such as `{"expected_version": 3}`. Supplying `Idempotency-Key` makes a retry return the original receipt; restoring older content still advances the dataset revision. Authentication supports registration, login, automatic refresh-token rotation, and logout/revocation. See [API examples](docs/API_EXAMPLES.md) and [Audit events and receipts](docs/AUDIT_RECEIPTS.md).
 
 ## Deliberate trade-offs
 
-- Local versioned files keep the project easy to run; horizontally scaled production should use encrypted object storage.
-- The upload receive cap is process-local; total concurrent uploads scale with API worker count, so production still needs edge request-size, timeout, and connection limits.
-- Application request guards bound bodies seen by FastAPI, but they complement rather than replace reverse-proxy and ASGI-server limits for slow or unread request streams.
-- Pandas remains the default for bounded workloads. Optional Polars and DuckDB adapters process Parquet projections in supervised subprocesses; other operations remain explicit capabilities of Pandas. Native memory and spill watchdogs complement container resource limits.
-- The local demo is intentionally non-persistent and clearly labeled.
-- Chart aggregation is synchronous today and bounded by the dataset limit; expensive analytical queries can move to a dedicated query worker later.
+- Local versioned files keep development reproducible. Horizontally scaled production needs an appropriate shared-storage design; encrypted object storage is a planned direction.
+- Upload receive concurrency is process-local and scales with the number of API workers. Application body guards complement reverse-proxy and ASGI-server size, timeout, and connection limits.
+- Pandas operations remain bounded by dataset limits and available memory. Native subprocess memory/spill watchdogs complement container limits; they do not make every operation distributed or streaming.
+- Audit events and receipts support recovery and traceability. ORM immutability checks do not protect against privileged direct database writes, and undo does not perform full checksum verification of historical snapshots.
+- Chart aggregation is synchronous and bounded by the dataset limit. Large analytical queries need a separate execution strategy.
+- Demo changes are non-persistent. The live backend is required to evaluate durable publication, job recovery, and account isolation.
+
+The full scope of these boundaries is recorded in [Known limitations](docs/LIMITATIONS.md).
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [API examples](docs/API_EXAMPLES.md)
-- [Deployment guide](docs/DEPLOYMENT.md)
-- [Operations and observability](docs/OPERATIONS.md)
-- [Processing, recovery, and upgrade procedure](docs/PROCESSING_RECOVERY.md)
-- [Audit events and idempotent undo receipts](docs/AUDIT_RECEIPTS.md)
-- [Release process](docs/RELEASES.md)
-- [Known limitations](docs/LIMITATIONS.md)
-- [Security model](docs/SECURITY.md)
-- [Architecture decisions](docs/DECISIONS.md)
-- [Contributing](CONTRIBUTING.md)
+| Goal | Read |
+| --- | --- |
+| Understand the design | [Architecture](docs/ARCHITECTURE.md) · [Decisions](docs/DECISIONS.md) |
+| Integrate a client | [API examples](docs/API_EXAMPLES.md) · [Audit and undo receipts](docs/AUDIT_RECEIPTS.md) |
+| Deploy and operate | [Deployment](docs/DEPLOYMENT.md) · [Operations and observability](docs/OPERATIONS.md) |
+| Recover or upgrade | [Processing, recovery, and upgrade procedure](docs/PROCESSING_RECOVERY.md) · [Release process](docs/RELEASES.md) |
+| Evaluate boundaries | [Known limitations](docs/LIMITATIONS.md) · [Security model](docs/SECURITY.md) |
+| Extend the platform | [Contributing](CONTRIBUTING.md) · [Transformation and engine contracts](CONTRIBUTING.md#adding-transformations-and-engines) |
 
 ## Next engineering milestones
 
-- S3/MinIO storage adapter with encrypted objects and signed downloads
-- OpenTelemetry traces and centralized error monitoring
-- Column-level validation contracts and scheduled quality rules
-- Measured memory/latency benchmarks, incremental quota accounting and explicit snapshot-retention windows
-- Visual regression snapshots for dashboard states
-- Distributed processing beyond single-node memory
+- S3/MinIO storage with artifact references, encrypted objects, and signed downloads.
+- OpenTelemetry traces and centralized error monitoring.
+- Column-level validation contracts and scheduled quality rules.
+- Measured memory/latency benchmarks, incremental quota accounting, and explicit snapshot-retention windows.
+- Visual regression snapshots for dashboard states.
+- Distributed processing beyond single-node memory.
 
 ## License
 
-MIT
+[MIT](LICENSE)

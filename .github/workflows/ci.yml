@@ -71,6 +71,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/dataflow-ui-review/artifacts/ui
     defaults:
       run:
         working-directory: frontend
@@ -100,6 +102,14 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Run desktop and mobile end-to-end tests
         run: pnpm test:e2e
+      - name: Upload desktop and mobile UI evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: workspace-ui-evidence
+          path: ${{ runner.temp }}/dataflow-ui-review/artifacts/ui
+          if-no-files-found: warn
+          retention-days: 14
 
   full-stack-e2e:
     runs-on: ubuntu-latest
