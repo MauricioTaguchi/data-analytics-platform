@@ -169,7 +169,7 @@ def test_stale_attempt_cannot_publish_or_remove_replacement_output(tmp_path):
     winner = {"path": None}
 
     def checkpoint():
-        if winner["path"] is not None or not list(prepared.prepared_path.parent.glob(".*.part.csv")):
+        if winner["path"] is not None or not list(prepared.prepared_path.parent.glob(".*.part.parquet")):
             return
         # The old attempt finished serialization and then lost its lease.
         # Its replacement uses the same logical operation and distinct bytes.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { applyDatasetTransformation, fetchTransformationHistory, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, undoDatasetTransformation, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
+import { applyDatasetTransformation, fetchTransformationHistory, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
 import { applyLocalOperation, buildApiParameters, type DataOperation, type DataRow } from "../data-utils";
+import { createUndoCoordinator } from "./undo-intent";
 
 type TrackJob = (taskId: string, label: string) => Promise<JobStatus>;
 
@@ -11,6 +12,8 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   const [preview, setPreview] = useState<TransformationPreview | null>(null);
   const [history, setHistory] = useState<TransformationResult[]>([]);
   const [localSnapshots, setLocalSnapshots] = useState<DataRow[][]>([]);
+  const [undoCoordinator] = useState(createUndoCoordinator);
+  const [undoNeedsRecovery, setUndoNeedsRecovery] = useState(false);
   const columns = Object.keys(rows[0] || {});
   const activeColumn = columns.includes(column) ? column : columns[0] || "";
   const datasetId = dataset?.id ?? null;
@@ -78,10 +81,18 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
 
   async function undo() {
     if (dataset) {
-      await undoDatasetTransformation(dataset.id, dataset.version);
-      setPreview(null);
-      await refresh();
-      await loadHistory();
+      try {
+        await undoCoordinator.run(dataset, async () => {
+          setPreview(null);
+          const results = await Promise.allSettled([refresh(), loadHistory()]);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        });
+        setUndoNeedsRecovery(false);
+      } catch (error) {
+        setUndoNeedsRecovery(undoCoordinator.needsRecovery(dataset.id));
+        throw error;
+      }
       return;
     }
     const previous = localSnapshots[localSnapshots.length - 1];
@@ -93,10 +104,12 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   const reset = useCallback(() => {
+    undoCoordinator.reset();
+    setUndoNeedsRecovery(false);
     setPreview(null);
     setHistory([]);
     setLocalSnapshots([]);
-  }, []);
+  }, [undoCoordinator]);
 
-  return { operation, setOperation, column: activeColumn, setColumn, value, setValue, preview, history, localSnapshots, previewOperation, applyOperation, undo, loadHistory, reset };
+  return { operation, setOperation, column: activeColumn, setColumn, value, setValue, preview, history, localSnapshots, previewOperation, applyOperation, undo, undoNeedsRecovery, loadHistory, reset };
 }

@@ -40,6 +40,9 @@ class PandasEngineAdapter:
         if checkpoint:
             checkpoint()
         after = self._transform(before, plan.operation, dict(plan.parameters))
+        # The operation owns its result; release the source frame before Arrow
+        # allocates serialization buffers for the immutable output snapshot.
+        del before
         self._validate(after)
         if checkpoint:
             checkpoint()

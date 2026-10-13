@@ -26,6 +26,28 @@ class TransformationPlan:
     operation: str
     parameters: Mapping[str, Any]
 
+    def validate_schema(self, schema: Any, *, engine_name: str) -> list[tuple[str, str]]:
+        """Check native projection semantics from Arrow metadata before execution."""
+        projection = self.projection(schema.names)
+        if engine_name == "duckdb":
+            import pyarrow as pa
+
+            # DuckDB resolves quoted identifiers without case sensitivity.
+            for names in (schema.names, [target for _, target in projection]):
+                folded = [name.lower() for name in names]
+                if len(set(folded)) != len(folded):
+                    raise EngineCapabilityError("DuckDB requires column names distinct ignoring case.")
+            for source, _ in projection:
+                dtype = schema.field(source).type
+                # DuckDB's zoned timestamp stores microseconds. Even aligned
+                # values lose their declared nanosecond schema on roundtrip.
+                if pa.types.is_timestamp(dtype) and dtype.tz and dtype.unit == "ns":
+                    raise EngineCapabilityError(
+                        f"The duckdb engine cannot preserve the type of column {source!r}. "
+                        "Choose pandas explicitly."
+                    )
+        return projection
+
     def projection(self, columns: list[str]) -> list[tuple[str, str]]:
         """Compile a projection without interpreting names as SQL or expressions."""
         if len(columns) != len(set(columns)):

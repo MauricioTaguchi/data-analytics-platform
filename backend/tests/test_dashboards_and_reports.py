@@ -301,8 +301,8 @@ def test_transformation_final_commit_is_reconciled_without_orphaning_output(
     # A rejected/ambiguous commit leaves tracked bytes for reconciliation;
     # collection must remove abandoned attempts and preserve a committed head.
     ArtifactService.cleanup()
-    csv_artifacts = list(tmp_path.glob("*.csv"))
-    assert len(csv_artifacts) == (2 if commit_succeeds else 1)
+    assert len(list(tmp_path.glob("*.csv"))) == 1  # Original upload remains unchanged.
+    assert len(list(tmp_path.glob("*.parquet"))) == (1 if commit_succeeds else 0)
     assert client.get(
         f"/api/v1/datasets/jobs/{queued.json()['task_id']}", headers=auth_headers,
     ).json()["status"] == expected_job

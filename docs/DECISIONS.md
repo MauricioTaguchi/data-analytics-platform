@@ -16,11 +16,17 @@ The client sends the dataset version it observed. A transformation advances the 
 
 ## Redis as a production dependency
 
-Cache entries, job ownership, active-job deduplication, and authentication rate limits must be shared by every API instance. Production therefore fails visibly when Redis is unavailable. A small bounded TTL cache exists only for development and tests.
+PostgreSQL owns job identity, admission limits, execution leases and durable results. Redis provides the broker, cache and shared rate limits. The recovery scheduler continues reconciling PostgreSQL while broker publication is unavailable. Authentication/upload rate-limit protection fails visibly if Redis is unavailable in production. A small bounded TTL fallback exists only for development and tests.
 
 ## Storage boundary
 
-`LocalStorage` owns file creation, version naming, and deletion. Dataset services depend on that boundary rather than constructing paths throughout the application. An S3-compatible adapter can implement the same behavior without changing routes or transformation rules.
+`LocalStorage` owns local file creation, version naming and deletion. Execution still consumes local `Path` references and publication relies on rename/fsync. An S3-compatible implementation requires immutable object identities, local materialization and object publication semantics; it is not a drop-in replacement for POSIX rename. Transformation rules can remain independent of that change.
+
+## Typed snapshots and operation contracts
+
+Every newly published transformation writes Parquet, even when its input is CSV, JSON or Excel. This preserves supported column types across reads. Source uploads remain unchanged, so undo returns their original bytes. It does not recover type information already lost during initial source inference. Legacy snapshots remain readable without a bulk conversion migration.
+
+The operation catalog defines parameter schemas, semantic versions and supported engines/formats. Requests may choose an engine explicitly; otherwise the configured default is resolved and persisted at admission. Exact retries without an explicit engine reuse the original choice. Preview materializes through the chosen adapter and follows the same serialization/resource checks as apply, then releases its temporary artifact.
 
 ## Demo-first frontend
 

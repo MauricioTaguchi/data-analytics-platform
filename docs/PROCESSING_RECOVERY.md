@@ -15,7 +15,12 @@ Content-Type: application/json
 ```
 
 A stale revision returns 409. Successful UNDO returns previous content at revision
-8. Account admission uses PostgreSQL `FOR NO KEY UPDATE`, followed by a fresh
+8. Send an `Idempotency-Key` for a retryable undo; its immutable receipt commits
+with the head change and returns the same result even if the response was lost or
+the dataset later advances. Legacy clients may omit the header but cannot recover
+an ambiguous result by key. See [Audit receipts](AUDIT_RECEIPTS.md).
+
+Account admission uses PostgreSQL `FOR NO KEY UPDATE`, followed by a fresh
 dataset lock. Final publication uses account, job, dataset, and artifact locks in
 that order. SQLite is supported for local functional tests; it does not enforce
 these row-lock guarantees. Redis rate limiting controls request volume. It is not
@@ -108,8 +113,16 @@ cutover; prefer a forward fix.
 The adapter contract is `SnapshotRef + TransformationPlan + ResourcePolicy ->
 MaterializedArtifact`. DataFrames stay inside the adapter. The worker owns leases,
 cancellation, quota revalidation, artifact publication, and database commits.
-The engine name is persisted when a transformation is admitted, so a retry does
-not silently switch engines after configuration changes.
+The engine name is persisted when a transformation or preview is admitted, so a
+retry does not silently switch engines after configuration changes. Requests can
+provide `engine` explicitly. `GET /api/v1/datasets/operations` exposes the typed
+parameter contracts and the supported engine/input pairs.
+
+New transformation outputs use Parquet, preserving supported column types after
+reload. Source uploads remain unchanged. A preview materializes through the
+selected adapter into a reserved temporary path, reads its sample, then requests
+cleanup without changing the dataset head. Preview summaries still use bounded
+Pandas reads before/after materialization; native preview is not fully streaming.
 
 | Engine | Supported input | Operations in this release | Execution |
 | --- | --- | --- | --- |
@@ -120,8 +133,9 @@ not silently switch engines after configuration changes.
 Native engines reject unsupported operations/formats explicitly. They never fall
 back to an eager Pandas load. Projections preserve row order and use literal column
 identifiers. The adapters expose no user-provided SQL, paths, extensions, or UDFs.
-Ingestion, profiling, previews, reports, and other operations still use the
-existing bounded Pandas paths; this change does not enable unlimited uploads.
+Ingestion, profiling, preview summaries and reports still use bounded Pandas
+paths; this change does not enable unlimited uploads. Dataset pagination over
+Parquet projects columns and visits only the needed row groups.
 
 For local Python development, install the optional pinned engines:
 
@@ -152,3 +166,10 @@ not cap all process memory, and Celery's `worker_max_memory_per_child` only recy
 workers after a task. Size the product of Celery concurrency and engine threads
 for available CPUs. Native semantics must be explicitly extended and validated
 before enabling casts, deduplication, or arbitrary analytical SQL.
+
+Compose bounds the worker container to 2 GiB and 2 CPUs by default. Set
+`DATAFLOW_WORKER_MEMORY_LIMIT` and `DATAFLOW_WORKER_CPUS` in the Compose environment
+to change these limits. They bound the whole worker, including child processes;
+Pandas does not yet have a per-attempt RSS watchdog. An OOM kill can terminate a
+worker and relies on the durable recovery path. Validate capacity with your data
+before increasing concurrency.

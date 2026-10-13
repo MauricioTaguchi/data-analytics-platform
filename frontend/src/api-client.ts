@@ -85,6 +85,12 @@ export type TransformationResult = {
   created_at: string;
 };
 
+export type UndoReceipt = TransformationResult & {
+  event_id: string;
+  previous_version: number;
+  result_version: number;
+};
+
 export type TransformationPreview = {
   before: { rows: number; columns: number; missing_cells: number };
   after: { rows: number; columns: number; missing_cells: number };
@@ -404,9 +410,24 @@ export async function fetchTransformationHistory(datasetId: number, signal?: Abo
   return response.data;
 }
 
-export async function undoDatasetTransformation(datasetId: number, expectedVersion: number) {
-  const response = await apiClient.post<TransformationResult>(`/datasets/${datasetId}/transformations/undo`, { expected_version: expectedVersion });
-  return response.data;
+export async function undoDatasetTransformation(datasetId: number, expectedVersion: number, idempotencyKey: string) {
+  const delays = [0, 250, 750];
+  let lastError: unknown;
+  for (const delayMs of delays) {
+    if (delayMs) await wait(delayMs);
+    try {
+      const response = await apiClient.post<UndoReceipt>(
+        `/datasets/${datasetId}/transformations/undo`,
+        { expected_version: expectedVersion },
+        { headers: { "Idempotency-Key": idempotencyKey } },
+      );
+      return response.data;
+    } catch (error) {
+      lastError = error;
+      if (!isAmbiguousJobCreationError(error)) throw error;
+    }
+  }
+  throw lastError;
 }
 
 export async function downloadDataset(datasetId: number) {

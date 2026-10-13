@@ -26,6 +26,15 @@ The React application includes a safe local demo, so a reviewer can evaluate the
 
 ## Engineering highlights
 
+| Engineering problem | Implemented boundary | Evidence |
+| --- | --- | --- |
+| Concurrent writes and undo | Monotonic revisions, conditional publication and PostgreSQL locks | [Concurrency tests](backend/tests/test_dataset_concurrency.py) |
+| Lost undo responses and expired jobs | Transactional audit events and immutable retry receipts | [Audit receipt tests](backend/tests/test_dataset_audit_receipts.py) |
+| Broker outage or lost worker | Transactional outbox, leased attempts and an independent recovery scheduler | [Recovery tests](backend/tests/test_outbox_recovery.py) |
+| Filesystem and database have no shared transaction | Immutable attempt paths, durable reservations and repeatable collection | [Publication tests](backend/tests/test_transformation_publication.py), [artifact tests](backend/tests/test_artifact_lifecycle.py) |
+| Different processing engines | Typed operation contracts, capability preflight and output checks | [Engine contract tests](backend/tests/test_transformation_engines.py) |
+| Failure between durable writes | Real process termination, broker interruption and independent recovery | [Process integration tests](backend/integration/test_process_recovery.py) |
+
 - Functional Overview, Datasets, Transformations, Dashboards, Reports, and Monitoring workspaces
 - Responsive React + TypeScript interface with desktop and mobile Playwright journeys
 - FastAPI routes with tenant isolation and consistent problem responses
@@ -43,23 +52,20 @@ The React application includes a safe local demo, so a reviewer can evaluate the
 
 ## Architecture
 
-```text
-React / TypeScript
-        |
-        v
-FastAPI API ----------------------> PostgreSQL
-   |                                  |       |
-   +--> Redis cache / rate limits     |       +--> versions, jobs, lineage
-   |                                  +----------> transactional task outbox
-   |                                             |
-   +<-- Celery worker / beat <-------------------+
-              |
-              +--------------------------> Versioned file storage
-                                                |
-                                                +--> datasets and PDF reports
+```mermaid
+flowchart TD
+    UI["React / TypeScript"] --> API["FastAPI"]
+    API --> DB[("PostgreSQL: revisions, events, jobs, outbox")]
+    API --> R[("Redis: broker, rate limits")]
+    S["Recovery scheduler"] --> DB
+    S --> R
+    R --> W["Celery workers"]
+    W --> DB
+    API --> F[("Immutable file storage")]
+    W --> F
 ```
 
-The `LocalStorage` boundary can be replaced by an S3-compatible adapter without changing transformation rules. See [Architecture](docs/ARCHITECTURE.md) and [Architecture decisions](docs/DECISIONS.md).
+Transformation rules are separated from publication. The current storage implementation still uses local paths, rename and fsync; an object-storage adapter also needs an artifact-reference and local-materialization boundary. See [Architecture](docs/ARCHITECTURE.md) and [Architecture decisions](docs/DECISIONS.md).
 
 ## Run locally
 
@@ -97,7 +103,9 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-CI additionally runs ESLint, targeted frontend coverage, PostgreSQL/Redis integration, migration validation, a Python dependency audit, pull-request dependency review, and CodeQL.
+The fast suite uses eager task execution; PostgreSQL-specific tests run against a real database in CI. A separate process integration job runs API, Redis delivery, Celery workers and recovery schedulers without eager mode. CI also validates migrations, dependency audits, lint, type checks and frontend journeys. Configured coverage thresholds are gates, not measured capacity claims.
+
+New transformation outputs use Parquet to retain column types; original uploads and historical snapshots remain available for undo. A preview materializes through the selected adapter before returning a sample. It does not mutate the dataset. Parquet dataset pagination reads only the requested columns and relevant row groups.
 
 ## Core API workflow
 
@@ -109,6 +117,8 @@ CI additionally runs ESLint, targeted frontend coverage, PostgreSQL/Redis integr
 - `POST /api/v1/datasets/{dataset_id}/transform/preview` — enqueue a dry-run against an expected version
 - `POST /api/v1/datasets/{dataset_id}/transform` — enqueue an idempotent transformation
 - `POST /api/v1/datasets/{dataset_id}/transformations/undo` — restore previous content with `{"expected_version": 3}`; the revision keeps increasing
+- `GET /api/v1/datasets/{dataset_id}/events` — inspect committed transformation and undo events
+- `GET /api/v1/datasets/operations` — discover typed parameters and engine capabilities
 - `POST /api/v1/dashboards` and `/dashboards/{id}/charts` — create persisted visualizations
 - `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` — enqueue a PDF report
 - `DELETE /api/v1/reports/{report_id}` — remove a terminal report and release its storage
@@ -131,17 +141,19 @@ Authentication supports registration, login, automatic refresh-token rotation, a
 - [Deployment guide](docs/DEPLOYMENT.md)
 - [Operations and observability](docs/OPERATIONS.md)
 - [Processing, recovery, and upgrade procedure](docs/PROCESSING_RECOVERY.md)
+- [Audit events and idempotent undo receipts](docs/AUDIT_RECEIPTS.md)
 - [Release process](docs/RELEASES.md)
 - [Known limitations](docs/LIMITATIONS.md)
 - [Security model](docs/SECURITY.md)
 - [Architecture decisions](docs/DECISIONS.md)
 - [Contributing](CONTRIBUTING.md)
 
-## Roadmap
+## Next engineering milestones
 
 - S3/MinIO storage adapter with encrypted objects and signed downloads
 - OpenTelemetry traces and centralized error monitoring
 - Column-level validation contracts and scheduled quality rules
+- Measured memory/latency benchmarks, incremental quota accounting and explicit snapshot-retention windows
 - Visual regression snapshots for dashboard states
 - Distributed processing beyond single-node memory
 

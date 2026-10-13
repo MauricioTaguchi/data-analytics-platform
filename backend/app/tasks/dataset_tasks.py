@@ -4,11 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.core.cache import CacheService
 from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.transformation import Transformation
 from app.services.dataset_service import DatasetService
+from app.core.config import settings
 from app.services.artifact_service import ArtifactService
 from app.services.job_service import (
     CANCELLATION_JOB_STATUSES,
@@ -569,10 +569,12 @@ def preview_transformation_task(
     operation: str,
     parameters: dict,
     expected_version: int,
+    engine_name: str = "pandas",
 ):
     task_id = str(self.request.id)
     attempt_token = uuid4().hex
     db = SessionLocal()
+    preview_path: Path | None = None
     try:
         _validate_job_target(db, task_id, dataset_id=dataset_id, kind="transformation-preview")
         job, acquired = JobService.start(
@@ -592,8 +594,23 @@ def preview_transformation_task(
             raise ValueError("Dataset version changed before preview execution.")
         stored_path = str(dataset.stored_path)
         dataset_snapshot = SimpleNamespace(status=str(dataset.status), stored_path=stored_path)
+        owner_id = int(job.owner_id)
+        final_path = storage.root / f"preview-{uuid4().hex}.parquet"
+        preview_path = storage.temporary_version_path(final_path)
+        ArtifactService.reserve(
+            db, owner_id=owner_id, task_id=task_id, attempt_token=attempt_token,
+            final_path=final_path, temporary_path=preview_path,
+        )
+        quota_remaining = max(
+            0, settings.USER_STORAGE_QUOTA_MB * 1024 * 1024
+            - DatasetService.tracked_storage_usage_bytes(db, owner_id),
+        )
         db.commit()
-        result = DatasetService.preview_transformation(dataset_snapshot, operation, parameters)
+        result = DatasetService.preview_transformation(
+            dataset_snapshot, operation, parameters, engine_name=engine_name,
+            output_path=preview_path, quota_remaining_bytes=quota_remaining,
+            checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
+        )
         _lease_checkpoint(db, task_id, attempt_token)
         current_dataset = (
             db.query(Dataset)
@@ -673,6 +690,17 @@ def preview_transformation_task(
         db.commit()
         raise
     finally:
+        if preview_path is not None:
+            # Preview bytes never become a dataset head. Durable reservations
+            # let the collector finish this work even after process termination.
+            db.rollback()
+            try:
+                ArtifactService.abandon_attempt(db, task_id, attempt_token)
+                db.commit()
+                storage.delete(preview_path)
+            except Exception:
+                db.rollback()
+                logger.warning("Preview artifact cleanup deferred for job %s.", task_id, exc_info=True)
         db.close()
 
 
@@ -690,7 +718,6 @@ def transform_dataset_task(self, transformation_id: int):
     attempt_token = uuid4().hex
     db = SessionLocal()
     completed: Transformation | None = None
-    completed_dataset_id: int | None = None
     result: dict | None = None
     try:
         _validate_job_target(db, task_id, transformation_id=transformation_id)
@@ -720,7 +747,6 @@ def transform_dataset_task(self, transformation_id: int):
                 stage="persisting",
             ),
         )
-        completed_dataset_id = int(completed.dataset_id)
         result = {
             "status": "completed",
             "transformation_id": completed.id,
@@ -733,7 +759,6 @@ def transform_dataset_task(self, transformation_id: int):
         }
         JobService.succeed(db, task_id, result, attempt_token=attempt_token)
         db.commit()
-        CacheService.delete(f"dataset:{completed_dataset_id}:profile")
         return result
     except JobCancellationRequested:
         db.rollback()
@@ -777,7 +802,6 @@ def transform_dataset_task(self, transformation_id: int):
                 "The worker attempt lost ownership while finalizing the transformation.",
             )
             if outcome == "completed" and result is not None:
-                CacheService.delete(f"dataset:{completed_dataset_id}:profile")
                 return result
             if outcome == "cancelled":
                 return {"status": "cancelled", "transformation_id": transformation_id}
@@ -792,7 +816,6 @@ def transform_dataset_task(self, transformation_id: int):
                 str(exc),
             )
             if outcome == "completed" and result is not None:
-                CacheService.delete(f"dataset:{completed_dataset_id}:profile")
                 return result
             if outcome in {"cancelled", "superseded"}:
                 return {"status": outcome, "transformation_id": transformation_id}
@@ -857,7 +880,6 @@ def transform_dataset_task(self, transformation_id: int):
                 str(exc),
             )
             if outcome == "completed" and result is not None:
-                CacheService.delete(f"dataset:{completed_dataset_id}:profile")
                 return result
             if outcome in {"cancelled", "superseded"}:
                 return {"status": outcome, "transformation_id": transformation_id}

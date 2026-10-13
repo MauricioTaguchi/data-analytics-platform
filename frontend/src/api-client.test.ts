@@ -14,6 +14,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   apiClient.defaults.adapter = async (config) => response(config, 204, null);
   await disconnectApi();
   apiClient.defaults.adapter = originalAdapter;
@@ -24,12 +25,47 @@ describe("API session client", () => {
     const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
       expect(config.url).toBe("/datasets/7/transformations/undo");
       expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
       const conflict = response(config, 409, { detail: "Dataset version changed." });
       throw new AxiosError("Dataset version changed.", "ERR_BAD_REQUEST", config, undefined, conflict);
     });
     apiClient.defaults.adapter = adapter;
-    await expect(undoDatasetTransformation(7, 8)).rejects.toThrow("Dataset version changed.");
+    await expect(undoDatasetTransformation(7, 8, "undo-revision-8")).rejects.toThrow("Dataset version changed.");
     expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays an undo with the same key and revision after an ambiguous response", async () => {
+    vi.useFakeTimers();
+    const receipt = { event_id: "audit-event", previous_version: 8, result_version: 9, status: "undone" };
+    let attempts = 0;
+    apiClient.defaults.adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
+      expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      attempts += 1;
+      if (attempts === 1) throw new AxiosError("Response lost", "ERR_NETWORK", config);
+      return response(config, 200, receipt);
+    });
+
+    const result = undoDatasetTransformation(7, 8, "undo-revision-8");
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual(receipt);
+    expect(attempts).toBe(2);
+  });
+
+  it("limits transient undo retries without changing its identity", async () => {
+    vi.useFakeTimers();
+    const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
+      expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      const unavailable = response(config, 503, { detail: "Service unavailable" });
+      throw new AxiosError("Service unavailable", "ERR_BAD_RESPONSE", config, undefined, unavailable);
+    });
+    apiClient.defaults.adapter = adapter;
+
+    const assertion = expect(undoDatasetTransformation(7, 8, "undo-revision-8")).rejects.toThrow("Service unavailable");
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(adapter).toHaveBeenCalledTimes(3);
   });
 
   it("uses the production API only for the explicitly trusted web host", () => {

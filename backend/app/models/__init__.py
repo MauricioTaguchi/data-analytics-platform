@@ -1,6 +1,7 @@
 from app.models.chart import Chart
 from app.models.dashboard import Dashboard
 from app.models.dataset import Dataset
+from app.models.dataset_event import DatasetEvent
 from app.models.job import JobRecord
 from app.models.project import Project
 from app.models.report import Report
@@ -14,6 +15,7 @@ __all__ = [
     "Chart",
     "Dashboard",
     "Dataset",
+    "DatasetEvent",
     "JobRecord",
     "Project",
     "RefreshSession",

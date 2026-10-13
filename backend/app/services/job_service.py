@@ -92,7 +92,7 @@ class JobService:
     @staticmethod
     def ensure_result_size(result: dict, *, label: str = "Job result") -> None:
         serialized_size = len(
-            json.dumps(result, ensure_ascii=True, default=str).encode("utf-8")
+            json.dumps(result, ensure_ascii=True, default=str, allow_nan=False).encode("utf-8")
         )
         result_limit = settings.MAX_JOB_RESULT_SIZE_MB * 1024 * 1024
         if serialized_size > result_limit:

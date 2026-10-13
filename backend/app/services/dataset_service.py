@@ -2,12 +2,15 @@ from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BufferedRandom, TextIOWrapper
+import math
+from numbers import Real
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 import pandas as pd
+import numpy as np
 from fastapi import UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,6 +23,7 @@ from app.models.transformation import Transformation
 from app.services.job_service import JobService
 from app.services.storage_service import storage
 from app.services.artifact_service import ArtifactService
+from app.services.dataset_audit_service import DatasetAuditService
 from app.services.engines import (
     PandasEngineAdapter, ResourcePolicy, SnapshotRef, TransformationPlan, select_engine,
 )
@@ -113,10 +117,18 @@ class DatasetService:
                 f"{settings.MAX_DATASET_COLUMN_NAME_CHARS:,} characters."
             )
 
-    @staticmethod
-    def normalize_preview_value(value):
+    @classmethod
+    def normalize_preview_value(cls, value):
+        # JSON has no NaN/Infinity; normalize only the presentation, never the
+        # stored snapshot. Arrow list/struct cells also need recursive handling.
+        if isinstance(value, dict):
+            return {str(key): cls.normalize_preview_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return [cls.normalize_preview_value(item) for item in value]
         missing = pd.isna(value)
         if not hasattr(missing, "__len__") and bool(missing):
+            return None
+        if isinstance(value, Real) and not math.isfinite(value):
             return None
         if isinstance(value, (bytes, bytearray, memoryview)):
             return f"<binary value: {len(value)} bytes>"
@@ -125,12 +137,28 @@ class DatasetService:
             return f"{value[:limit]}..."
         if hasattr(value, "item"):
             try:
-                value = value.item()
+                return cls.normalize_preview_value(value.item())
             except ValueError:
                 return str(value)[: settings.TRANSFORMATION_PREVIEW_MAX_CELL_CHARS]
         if hasattr(value, "isoformat"):
             return value.isoformat()
+        if not isinstance(value, (str, int, float, bool, type(None))):
+            # Decimal and other scalar extension values retain a readable
+            # representation without depending on a framework JSON encoder.
+            return str(value)[: settings.TRANSFORMATION_PREVIEW_MAX_CELL_CHARS]
         return value
+
+    @staticmethod
+    def _comparison_value(value):
+        """Hashable identities for the nested cells accepted by JSON/Parquet."""
+        if isinstance(value, dict):
+            return ("struct", tuple(sorted(
+                (str(key), DatasetService._comparison_value(item)) for key, item in value.items()
+            )))
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return ("list", tuple(DatasetService._comparison_value(item) for item in value))
+        missing = pd.isna(value)
+        return None if not hasattr(missing, "__len__") and bool(missing) else value
 
     @classmethod
     def preview_records(cls, dataframe: pd.DataFrame) -> list[dict]:
@@ -276,19 +304,33 @@ class DatasetService:
     @staticmethod
     def read_dataframe(path: Path) -> pd.DataFrame:
         suffix = path.suffix.lower()
+        row_limit = settings.MAX_DATASET_ROWS
         if suffix == ".csv":
-            return pd.read_csv(path)
-        if suffix == ".xlsx":
+            # Validate the header before allocating rows. nrows bounds parsing
+            # while retaining Pandas' whole-column type inference; concatenating
+            # independently inferred chunks can silently change mixed columns.
+            DatasetService.validate_dataframe_structure(pd.read_csv(path, nrows=0))
+            dataframe = pd.read_csv(path, nrows=row_limit + 1)
+        elif suffix in {".xlsx", ".xls"}:
+            if suffix == ".xlsx":
+                DatasetService.preflight_binary_dataset(path)
+            with pd.ExcelFile(path) as workbook:
+                DatasetService.validate_dataframe_structure(pd.read_excel(workbook, nrows=0))
+                dataframe = pd.read_excel(workbook, nrows=row_limit + 1)
+        elif suffix == ".json":
+            # The existing JSON contract accepts arrays and column-oriented
+            # objects, not just JSONL. Keep that contract; this parser is eager
+            # and remains subject to upload/worker limits.
+            dataframe = pd.read_json(path)
+        elif suffix == ".parquet":
             DatasetService.preflight_binary_dataset(path)
-            return pd.read_excel(path)
-        if suffix == ".xls":
-            return pd.read_excel(path)
-        if suffix == ".json":
-            return pd.read_json(path)
-        if suffix == ".parquet":
-            DatasetService.preflight_binary_dataset(path)
-            return pd.read_parquet(path)
-        raise ValueError("Unsupported file format.")
+            dataframe = pd.read_parquet(path)
+        else:
+            raise ValueError("Unsupported file format.")
+        DatasetService.validate_dataframe_structure(dataframe)
+        if len(dataframe) > row_limit:
+            raise DatasetExpansionLimitError(f"Datasets are limited to {row_limit:,} rows.")
+        return dataframe
 
     @staticmethod
     def write_dataframe(df: pd.DataFrame, path: Path) -> None:
@@ -358,13 +400,23 @@ class DatasetService:
                 else:
                     raise ValueError("Unsupported file format.")
                 destination.flush()
+            if path.suffix.lower() == ".parquet":
+                # A compressed artifact must remain readable under the same
+                # expansion/shape limits used by previews and later operations.
+                cls.preflight_binary_dataset(path)
         except Exception:
             storage.delete(path)
             raise
 
     @staticmethod
     def apply_operation(df: pd.DataFrame, operation: str, parameters: dict) -> pd.DataFrame:
-        result = df.copy(deep=True)
+        from app.services.operations import validate_operation
+        from app.services.safe_cast import safe_cast_column
+
+        parameters = validate_operation(operation, parameters)
+        # Pandas' non-inplace operations below already allocate their result.
+        # Only column assignment during casting needs an explicit source copy.
+        result = df.copy(deep=True) if operation == "cast_types" else df
         if operation == "drop_columns":
             columns = parameters.get("columns", [])
             unknown = set(columns) - set(result.columns)
@@ -394,7 +446,7 @@ class DatasetService:
             if unknown:
                 raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
             for column, dtype in mapping.items():
-                result[column] = result[column].astype(dtype)
+                result[column] = safe_cast_column(result[column], dtype)
         else:
             raise ValueError("Unsupported transformation operation.")
         if result.shape[1] == 0:
@@ -474,19 +526,57 @@ class DatasetService:
     @classmethod
     def preview(cls, dataset: Dataset, page: int, page_size: int) -> dict:
         cls.ensure_ready(dataset)
-        dataframe = cls.read_dataframe(Path(dataset.stored_path))
+        path = Path(dataset.stored_path)
         start = (page - 1) * page_size
-        preview_columns = list(dataframe.columns[: settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS])
-        page_frame = dataframe.iloc[
-            start : start + page_size,
-            : settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS,
-        ].copy()
+        if path.suffix.lower() == ".parquet":
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            cls.preflight_binary_dataset(path)
+            with pq.ParquetFile(path) as source:
+                total_rows = source.metadata.num_rows
+                total_columns = len(source.schema_arrow.names)
+                preview_columns = source.schema_arrow.names[: settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS]
+                selected_batches = []
+                remaining = page_size
+                group_start = 0
+                for index in range(source.metadata.num_row_groups):
+                    group_rows = source.metadata.row_group(index).num_rows
+                    group_end = group_start + group_rows
+                    if group_end > start and group_start < start + page_size:
+                        skip = max(0, start - group_start)
+                        for batch in source.iter_batches(
+                            batch_size=min(4096, page_size), row_groups=[index], columns=preview_columns,
+                        ):
+                            if skip >= batch.num_rows:
+                                skip -= batch.num_rows
+                                continue
+                            selected = batch.slice(skip, min(remaining, batch.num_rows - skip))
+                            selected_batches.append(selected)
+                            remaining -= selected.num_rows
+                            skip = 0
+                            if remaining == 0:
+                                break
+                    group_start = group_end
+                    if remaining == 0 or group_start >= start + page_size:
+                        break
+                page_frame = (
+                    pa.Table.from_batches(selected_batches).to_pandas()
+                    if selected_batches else pd.DataFrame(columns=preview_columns)
+                )
+        else:
+            dataframe = cls.read_dataframe(path)
+            total_rows, total_columns = dataframe.shape
+            preview_columns = list(dataframe.columns[: settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS])
+            page_frame = dataframe.iloc[
+                start : start + page_size, : settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS,
+            ].copy()
         return {
             "columns": [str(column) for column in page_frame.columns],
             "rows": cls.preview_records(page_frame),
-            "total_rows": int(dataframe.shape[0]),
-            "total_columns": int(dataframe.shape[1]),
-            "columns_truncated": max(0, len(dataframe.columns) - len(preview_columns)),
+            "total_rows": int(total_rows),
+            "total_columns": int(total_columns),
+            "columns_truncated": max(0, total_columns - len(preview_columns)),
             "page": page,
             "page_size": page_size,
         }
@@ -498,34 +588,46 @@ class DatasetService:
         all_numeric_columns = dataframe.select_dtypes(include="number")
         numeric_frame = all_numeric_columns.iloc[
             :, : settings.MAX_PROFILE_CORRELATION_COLUMNS
-        ]
+        ].replace([np.inf, -np.inf], np.nan)
         total_cells = max(int(dataframe.shape[0] * dataframe.shape[1]), 1)
         columns: list[dict[str, Any]] = []
         for name in dataframe.columns:
             series = dataframe[name]
+            missing_count = int(series.isna().sum())
+            try:
+                unique_count = int(series.nunique(dropna=True))
+            except TypeError:
+                unique_count = int(series.map(cls._comparison_value).nunique(dropna=True))
             item: dict[str, Any] = {
                 "name": str(name),
                 "dtype": str(series.dtype),
-                "missing_count": int(series.isna().sum()),
-                "missing_percentage": round(float(series.isna().mean() * 100), 2),
-                "unique_count": int(series.nunique(dropna=True)),
+                "missing_count": missing_count,
+                "missing_percentage": round(missing_count / max(len(series), 1) * 100, 2),
+                "unique_count": unique_count,
             }
-            if pd.api.types.is_numeric_dtype(series) and not series.dropna().empty:
-                clean = series.dropna()
-                q1, q3 = clean.quantile([0.25, 0.75])
-                iqr = q3 - q1
+            if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+                present = series.dropna()
+                clean = present[np.isfinite(present)]
+                outlier_count = 0
+                if not clean.empty:
+                    q1, q3 = clean.quantile([0.25, 0.75])
+                    iqr = q3 - q1
+                    outlier_count = int(((clean < q1 - 1.5 * iqr) | (clean > q3 + 1.5 * iqr)).sum())
                 item.update(
                     {
-                        "outlier_count": int(
-                            clean[(clean < q1 - 1.5 * iqr) | (clean > q3 + 1.5 * iqr)].shape[0]
-                        ),
-                        "mean": round(float(clean.mean()), 4),
-                        "median": round(float(clean.median()), 4),
+                        "finite_count": int(len(clean)),
+                        "non_finite_count": int(len(present) - len(clean)),
+                        "outlier_count": outlier_count,
+                        "mean": cls.normalize_preview_value(round(float(clean.mean()), 4)) if len(clean) else None,
+                        "median": cls.normalize_preview_value(round(float(clean.median()), 4)) if len(clean) else None,
                     }
                 )
             columns.append(item)
 
-        duplicate_rows = int(dataframe.duplicated().sum())
+        try:
+            duplicate_rows = int(dataframe.duplicated().sum())
+        except TypeError:
+            duplicate_rows = int(dataframe.map(cls._comparison_value).duplicated().sum())
         missing_cells = int(dataframe.isna().sum().sum())
         quality_score = max(
             0,
@@ -543,11 +645,14 @@ class DatasetService:
         correlations = (
             numeric_frame.corr(numeric_only=True)
             .round(4)
-            .where(lambda values: values.notna(), None)
             .to_dict()
             if numeric_frame.shape[1] >= 2
             else {}
         )
+        correlations = {
+            str(column): {str(other): cls.normalize_preview_value(value) for other, value in values.items()}
+            for column, values in correlations.items()
+        }
         return {
             "summary": {
                 "rows": int(dataframe.shape[0]),
@@ -566,13 +671,59 @@ class DatasetService:
                 int(all_numeric_columns.shape[1] - numeric_frame.shape[1]),
             ),
             "suggestions": suggestions,
+            "numeric_statistics_policy": "Means, medians, outliers and correlations use finite values only; undefined statistics are null. Missing counts exclude infinities.",
         }
 
     @classmethod
-    def preview_transformation(cls, dataset: ReadySnapshot, operation: str, parameters: dict) -> dict:
+    def preview_transformation(
+        cls, dataset: ReadySnapshot, operation: str, parameters: dict, *, engine_name: str | None = None,
+        output_path: Path | None = None, checkpoint: Callable[[], object] | None = None,
+        quota_remaining_bytes: int | None = None,
+    ) -> dict:
+        from app.services.operations import validate_operation_capability
+
         cls.ensure_ready(dataset)
+        selected_engine = engine_name or settings.TRANSFORMATION_ENGINE
+        plan = validate_operation_capability(
+            operation, parameters,
+            engine_name=selected_engine,
+            input_path=Path(dataset.stored_path),
+        )
         before = cls.read_dataframe(Path(dataset.stored_path))
-        after = cls.apply_operation(before, operation, parameters)
+        before_summary = {
+            "rows": len(before),
+            "columns": len(before.columns),
+            "missing_cells": int(before.isna().sum().sum()),
+        }
+        if output_path is not None:
+            del before
+            adapter = select_engine(selected_engine, pandas=PandasEngineAdapter(
+                read=cls.read_dataframe, transform=cls.apply_operation,
+                validate=cls.validate_dataframe_structure, write=cls.write_dataframe_limited,
+            ))
+            adapter.materialize(
+                SnapshotRef(Path(dataset.stored_path)), plan, output_path,
+                ResourcePolicy(
+                    max_output_bytes=settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024,
+                    quota_remaining_bytes=(
+                        quota_remaining_bytes if quota_remaining_bytes is not None
+                        else settings.USER_STORAGE_QUOTA_MB * 1024 * 1024
+                    ),
+                    threads=settings.TRANSFORMATION_ENGINE_THREADS,
+                    memory_limit_bytes=settings.TRANSFORMATION_ENGINE_MEMORY_MB * 1024 * 1024,
+                    max_spill_bytes=settings.TRANSFORMATION_ENGINE_SPILL_MB * 1024 * 1024,
+                    timeout_seconds=settings.TRANSFORMATION_ENGINE_TIMEOUT_SECONDS,
+                    max_columns=settings.MAX_DATASET_COLUMNS,
+                    max_column_name_chars=settings.MAX_DATASET_COLUMN_NAME_CHARS,
+                    max_rows=settings.MAX_DATASET_ROWS,
+                ),
+                checkpoint,
+            )
+            # The task owns this durable temporary reservation and its cleanup.
+            after = cls.read_dataframe(output_path)
+        else:
+            # Kept for direct callers that only need an in-memory Pandas preview.
+            after = cls.apply_operation(before, operation, dict(plan.parameters))
         cls.validate_dataframe_structure(after)
         preview_columns = list(after.columns[: settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS])
         sample = after.loc[:, preview_columns].head(20)
@@ -580,11 +731,7 @@ class DatasetService:
         rows = cls.preview_records(sample)
         return {
             "operation": operation,
-            "before": {
-                "rows": len(before),
-                "columns": len(before.columns),
-                "missing_cells": int(before.isna().sum().sum()),
-            },
+            "before": before_summary,
             "after": {
                 "rows": len(after),
                 "columns": len(after.columns),
@@ -605,6 +752,7 @@ class DatasetService:
         user_id: int,
         expected_version: int,
         idempotency_key: str,
+        engine_name: str | None = None,
     ) -> tuple[Transformation, bool]:
         # Take the account lock before either the dataset mutation or the
         # transformation FK flush, matching transformation publication.
@@ -639,6 +787,7 @@ class DatasetService:
                 existing.operation != operation
                 or existing.parameters != parameters
                 or existing.expected_version != expected_version
+                or (engine_name is not None and existing.engine_name != engine_name)
             ):
                 raise ValueError(
                     "Idempotency-Key has already been used with a different transformation request."
@@ -652,6 +801,12 @@ class DatasetService:
             )
 
         input_path = Path(dataset.stored_path)
+        from app.services.operations import validate_operation_capability
+
+        resolved_engine = engine_name or settings.TRANSFORMATION_ENGINE
+        validate_operation_capability(
+            operation, parameters, engine_name=resolved_engine, input_path=input_path,
+        )
         output_path = storage.version_path(input_path)
         transformation = Transformation(
             dataset_id=dataset.id,
@@ -661,7 +816,7 @@ class DatasetService:
             status="pending",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
-            engine_name=settings.TRANSFORMATION_ENGINE,
+            engine_name=resolved_engine,
             input_path=str(input_path),
             output_path=str(output_path),
             before_rows=int(dataset.row_count or 0),
@@ -692,6 +847,7 @@ class DatasetService:
                     existing.operation != operation
                     or existing.parameters != parameters
                     or existing.expected_version != expected_version
+                    or (engine_name is not None and existing.engine_name != engine_name)
                 ):
                     raise ValueError(
                         "Idempotency-Key has already been used with a different transformation request."
@@ -729,7 +885,7 @@ class DatasetService:
             raise ValueError("A transformation requires a durable job before execution.")
         attempt_token = attempt_token or uuid4().hex
         prepared_path = Path(transformation.output_path)
-        suffix = prepared_path.suffix if engine_name == "pandas" else ".parquet"
+        suffix = ".parquet"
         # Each attempt owns different bytes, including after the rename. A stale
         # worker can never overwrite/delete the output of its replacement.
         final_path = prepared_path.with_name(f"{uuid4().hex}{suffix}")
@@ -817,6 +973,7 @@ class DatasetService:
             transformation.error_message = None
             db.flush()
             db.refresh(transformation)
+            DatasetAuditService.record_transformation(db, transformation, artifact=artifact)
             return transformation
         except Exception:
             db.rollback()
@@ -833,7 +990,10 @@ class DatasetService:
         user_id: int,
         *,
         expected_version: int,
-    ) -> Transformation:
+        idempotency_key: str | None = None,
+    ) -> dict:
+        if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 120):
+            raise ValueError("Idempotency-Key must contain 1 to 120 characters.")
         JobService.lock_owner(db, user_id)
         locked_dataset = (
             db.query(Dataset)
@@ -849,6 +1009,17 @@ class DatasetService:
         )
         if not locked_dataset:
             raise ValueError("Dataset not found.")
+        fingerprint = DatasetAuditService.fingerprint(
+            kind="undo", dataset_id=locked_dataset.id, expected_version=expected_version,
+        )
+        receipt = DatasetAuditService.replay(
+            db, dataset_id=locked_dataset.id, actor_id=user_id, kind="undo",
+            idempotency_key=idempotency_key, request_fingerprint=fingerprint,
+        )
+        if receipt is not None:
+            # Release admission locks; a replay is a read of its original result.
+            db.rollback()
+            return receipt
         if locked_dataset.version != expected_version:
             raise ValueError("Dataset version changed. Refresh and try again.")
         DatasetService.ensure_ready(locked_dataset)
@@ -868,6 +1039,18 @@ class DatasetService:
         )
         if not transformation:
             raise ValueError("There is no completed transformation for the active dataset to undo.")
+        # The collector preserves history, but an operator or volume failure can
+        # still remove it. Refuse to publish a missing/unreadable snapshot. This
+        # is an availability check, not a claim of cryptographic integrity.
+        try:
+            restored_path = Path(transformation.input_path)
+            if not restored_path.is_file():
+                raise OSError("Snapshot is not a regular file.")
+            with restored_path.open("rb") as restored:
+                if not restored.read(1):
+                    raise OSError("Snapshot is empty.")
+        except OSError as exc:
+            raise ValueError("The previous snapshot is unavailable; the active dataset was not changed.") from exc
         transformation.undone_at = datetime.now(timezone.utc)
         transformation.status = "undone"
         locked_dataset.stored_path = transformation.input_path
@@ -878,6 +1061,11 @@ class DatasetService:
         locked_dataset.version += 1
         locked_dataset.profile_json = None
         locked_dataset.status = "ready"
+        receipt = DatasetAuditService.record_undo(
+            db, transformation, actor_id=user_id, previous_version=expected_version,
+            idempotency_key=idempotency_key, request_fingerprint=fingerprint,
+        )
         db.commit()
-        db.refresh(transformation)
-        return transformation
+        # No database/cache read after commit: a lost acknowledgement is resolved
+        # by replaying the immutable receipt with the same idempotency key.
+        return receipt

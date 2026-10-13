@@ -37,6 +37,9 @@ services:
     container_name: analytics-worker
     init: true
     restart: unless-stopped
+    mem_limit: ${DATAFLOW_WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${DATAFLOW_WORKER_CPUS:-2.0}
+    pids_limit: 256
     env_file: [./backend/.env]
     depends_on:
       db: { condition: service_healthy }

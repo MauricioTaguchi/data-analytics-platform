@@ -11,11 +11,14 @@ DataFlow is a production-minded portfolio/reference implementation. The controls
 - Multipart request bytes are bounded as they enter parsing and concurrent upload receives are capped per API process. Each accepted request can still create one bounded Starlette spool before authentication dependencies and route code execute. The cap is not cluster-wide: every additional API worker or replica adds its own slots, and slow-client protection still depends on reverse-proxy/server body and timeout limits.
 - The non-upload body guard counts bytes only when an endpoint consumes its request stream. `Content-Length` is always checked for body-bearing methods, but rejecting slow, unread, or indefinitely streamed bodies still requires ASGI-server and edge timeouts.
 - Chart aggregation is synchronous and bounded by the configured dataset limits.
+- Parquet dataset previews use projected row-group reads, but chart aggregation, profiling and transformation-preview summaries still materialize bounded Pandas frames. No measured throughput or production capacity is claimed.
+- Native engine resource policies do not provide per-attempt memory enforcement for Pandas. Compose sets an aggregate worker memory/CPU limit; deployments outside Compose must configure equivalent limits.
 
 ## Durability and recovery
 
 - The repository does not provision automated database backups, object replication, cross-region recovery, or restore drills.
 - Transformation undo restores a prior dataset pointer; it is not a substitute for infrastructure backup and disaster recovery.
+- Undo checks that the target snapshot is readable and non-empty, but does not verify its checksum. Application audit events are append-only through the service/ORM; direct SQL and database administrators can still change them. Historical operations are not fabricated during the audit migration.
 - Recovery objectives such as RPO and RTO are intentionally unspecified until a deployment platform, backup policy, and restore test exist.
 
 ## Observability
