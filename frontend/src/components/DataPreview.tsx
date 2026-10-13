@@ -4,7 +4,6 @@ import type { DataRow } from "../data-utils";
 type Props = { rows: DataRow[]; columns: string[]; visibleColumns: string[]; search: string; onSearch: (value: string) => void };
 
 const PREVIEW_PAGE_SIZE = 10;
-const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
 export function inferPreviewType(rows: DataRow[], column: string) {
   const types = new Set<string>();
@@ -26,7 +25,7 @@ export function previewPage(rows: DataRow[], requestedPage: number) {
 
 function formatValue(value: DataRow[string] | undefined) {
   if (value === null || value === undefined) return <span className="null-value">null</span>;
-  if (typeof value === "number") return numberFormat.format(value);
+  if (typeof value === "number") return String(value);
   return value;
 }
 

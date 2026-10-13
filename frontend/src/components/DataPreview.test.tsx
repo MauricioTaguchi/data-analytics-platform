@@ -32,6 +32,15 @@ describe("loaded data preview", () => {
     expect(inferPreviewType([{ value: "2026-10-13" }], "value")).toBe("text");
   });
 
+  it("preserves small values, distinct decimals and numeric identifiers in rendered cells", () => {
+    const values = [0.0001, 2.001, 2.002, 100001].map((value) => ({ value }));
+    const markup = renderToStaticMarkup(<DataPreview rows={values} columns={["value"]} visibleColumns={["value"]} search="" onSearch={() => undefined} />);
+    for (const value of ["0.0001", "2.001", "2.002", "100001"]) {
+      expect(markup).toContain(`<td>${value}</td>`);
+    }
+    expect(markup).not.toContain("100,001");
+  });
+
   it("shows a recoverable empty state when no columns match", () => {
     const markup = renderToStaticMarkup(<DataPreview rows={rows} columns={["item"]} visibleColumns={[]} search="absent" onSearch={() => undefined} />);
     expect(markup).toContain("No matching columns");
