@@ -11,6 +11,7 @@ import { WorkspaceSidebar, type WorkspaceSection } from "./components/WorkspaceS
 import { WorkspaceIcon, type WorkspaceIconName } from "./components/WorkspaceIcon";
 import { useAuthentication } from "./hooks/useAuthentication";
 import { useDatasetUpload } from "./hooks/useDatasetUpload";
+import { useDialogFocus } from "./hooks/useDialogFocus";
 import { isTerminalJobStatus, useProfilingJob } from "./hooks/useProfilingJob";
 import { useTransformations } from "./hooks/useTransformations";
 import { useTheme } from "./hooks/useTheme";
@@ -48,6 +49,7 @@ export function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [tourStep, setTourStep] = useState<number | null>(0);
+  const tourDialog = useDialogFocus(tourStep !== null, () => setTourStep(null));
   const [apiStatus, setApiStatus] = useState("not checked");
   const lifecycleOperation = useRef(false);
   const menuButton = useRef<HTMLButtonElement>(null);
@@ -83,6 +85,13 @@ export function App() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [mobileNav]);
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 761px)");
+    const closeOnDesktop = () => { if (desktop.matches) setMobileNav(false); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, []);
 
   useEffect(() => {
     if (auth.sessionExpiredAt === null) return;
@@ -206,6 +215,6 @@ export function App() {
       <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{auth.live ? "Authenticated session · server persistence" : "Demo workspace · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />Export current version</button></footer>
     </main>
     {connectionOpen ? <ConnectionPanel busy={auth.busy} onClose={() => setConnectionOpen(false)} onSubmit={connect} /> : null}
-    {tourStep !== null ? <div className="tour-backdrop" role="presentation"><section className="tour-dialog" role="dialog" aria-modal="true" aria-labelledby="tour-title"><span className="tour-progress">{tourStep + 1} of {TOUR_STEPS.length}</span><h2 id="tour-title">{TOUR_STEPS[tourStep].title}</h2><p>{TOUR_STEPS[tourStep].body}</p><div className="tour-dots" aria-hidden="true">{TOUR_STEPS.map((_, index) => <span key={index} className={index === tourStep ? "active" : ""} />)}</div><div className="button-row"><button className="secondary" onClick={() => setTourStep(null)}>Skip tour</button><button className="primary" autoFocus onClick={() => setTourStep(tourStep === TOUR_STEPS.length - 1 ? null : tourStep + 1)}>{tourStep === TOUR_STEPS.length - 1 ? "Explore DataFlow" : "Next"}</button></div></section></div> : null}
+    {tourStep !== null ? <div className="tour-backdrop" role="presentation"><section ref={tourDialog} tabIndex={-1} className="tour-dialog" role="dialog" aria-modal="true" aria-labelledby="tour-title"><span className="tour-progress">{tourStep + 1} of {TOUR_STEPS.length}</span><h2 id="tour-title">{TOUR_STEPS[tourStep].title}</h2><p>{TOUR_STEPS[tourStep].body}</p><div className="tour-dots" aria-hidden="true">{TOUR_STEPS.map((_, index) => <span key={index} className={index === tourStep ? "active" : ""} />)}</div><div className="button-row"><button className="secondary" onClick={() => setTourStep(null)}>Skip tour</button><button className="primary" data-dialog-initial-focus="true" onClick={() => setTourStep(tourStep === TOUR_STEPS.length - 1 ? null : tourStep + 1)}>{tourStep === TOUR_STEPS.length - 1 ? "Explore DataFlow" : "Next"}</button></div></section></div> : null}
   </div>;
 }

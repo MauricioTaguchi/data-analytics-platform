@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from "react";
 import type { AuthenticationInput } from "../api-client";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 type Props = { busy: boolean; onClose: () => void; onSubmit: (input: AuthenticationInput) => Promise<void> };
 
 export function ConnectionPanel({ busy, onClose, onSubmit }: Props) {
+  const dialogRef = useDialogFocus(true, onClose);
   const [intent, setIntent] = useState<AuthenticationInput["intent"]>("register");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -11,7 +13,7 @@ export function ConnectionPanel({ busy, onClose, onSubmit }: Props) {
   async function handleSubmit(event: FormEvent) { event.preventDefault(); await onSubmit({ intent, name, email, password }); }
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="connection-dialog" role="dialog" aria-modal="true" aria-labelledby="connection-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} tabIndex={-1} className="connection-dialog" role="dialog" aria-modal="true" aria-labelledby="connection-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialog-heading"><div>
           <span className="eyebrow">Live API</span><h2 id="connection-title">Connect to the production workflow</h2>
           <p>Tokens stay in memory and refresh automatically. Signing out revokes the server session.</p>

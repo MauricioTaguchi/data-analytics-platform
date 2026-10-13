@@ -12,6 +12,7 @@ type Props = { live: boolean; busy: boolean; columns: string[]; operation: DataO
 
 export function TransformationBuilder(props: Props) {
   const current = COPY[props.operation];
+  const removedRows = props.preview ? props.preview.before.rows - props.preview.after.rows : 0;
   return <section className="work-main">
     <article className="panel transformation-card"><div className="panel-header"><div><h2>Transformation builder</h2><p>{props.live ? "Preview and execution are version-controlled by the API." : "Explore transformations locally before connecting the API."}</p></div></div>
       <div className="transform-layout"><div className="operation-list">{(Object.keys(COPY) as DataOperation[]).map((key) => <button key={key} className={props.operation === key ? "selected" : ""} onClick={() => props.onOperation(key)}>{COPY[key].label}</button>)}</div>
@@ -22,7 +23,7 @@ export function TransformationBuilder(props: Props) {
         </div></div>
     </article>
     <article className="panel comparison-card"><div className="panel-header"><div><h2>Before and after</h2><p>{props.preview ? "Impact of the proposed operation" : "Create a preview before changing the dataset."}</p></div></div>
-      {props.preview ? <div className="comparison"><div><span>Before</span><strong>{props.preview.before.rows} rows</strong><small>{props.preview.before.columns} columns</small></div><div className="comparison-arrow">→</div><div><span>After</span><strong>{props.preview.after.rows} rows</strong><small>{props.preview.after.columns} columns</small></div><div className="impact"><span>Impact</span><strong>{props.preview.before.rows - props.preview.after.rows} rows removed</strong><small>{props.preview.after.missing_cells} missing values remain</small></div></div>
+      {props.preview ? <div className="comparison"><div><span>Before</span><strong>{props.preview.before.rows} rows</strong><small>{props.preview.before.columns} columns</small></div><div className="comparison-arrow">→</div><div><span>After</span><strong>{props.preview.after.rows} rows</strong><small>{props.preview.after.columns} columns</small></div><div className="impact"><span>Impact</span><strong>{removedRows} {removedRows === 1 ? "row" : "rows"} removed</strong><small>{props.preview.after.missing_cells} {props.preview.after.missing_cells === 1 ? "missing value remains" : "missing values remain"}</small></div></div>
         : <div className="empty-state"><strong>No active preview</strong><span>Select an operation and preview its impact.</span></div>}
     </article>
   </section>;

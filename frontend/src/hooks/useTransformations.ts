@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { applyDatasetTransformation, fetchTransformationHistory, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
-import { applyLocalOperation, buildApiParameters, type DataOperation, type DataRow } from "../data-utils";
+import { applyLocalOperation, buildApiParameters, calculateQuality, type DataOperation, type DataRow } from "../data-utils";
 import { createUndoCoordinator } from "./undo-intent";
 
 type TrackJob = (taskId: string, label: string) => Promise<JobStatus>;
@@ -49,7 +49,11 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
       setPreview(result); return result;
     }
     const next = applyLocalOperation(rows, operation, { column: activeColumn, value });
-    const result = { before: { rows: rows.length, columns: columns.length, missing_cells: 0 }, after: { rows: next.length, columns: Object.keys(next[0] || {}).length, missing_cells: 0 }, rows: next };
+    const result = {
+      before: { rows: rows.length, columns: columns.length, missing_cells: calculateQuality(rows).missingCount },
+      after: { rows: next.length, columns: Object.keys(next[0] || {}).length, missing_cells: calculateQuality(next).missingCount },
+      rows: next,
+    };
     setPreview(result); return result;
   }
 

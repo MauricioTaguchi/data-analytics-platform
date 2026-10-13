@@ -9,10 +9,17 @@ async function openSection(page: Page, name: string) {
 test("guided tour leads into a reversible sample transformation", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Start with trustworthy data" })).toBeVisible();
-  await page.getByRole("button", { name: "Next" }).click();
-  await page.getByRole("button", { name: "Next" }).click();
-  await page.getByRole("button", { name: "Explore DataFlow" }).click();
+  const tour = page.getByRole("dialog");
+  await expect(tour.getByRole("heading", { name: "Start with trustworthy data" })).toBeVisible();
+  const next = tour.getByRole("button", { name: "Next", exact: true });
+  await next.focus();
+  await page.keyboard.press("Tab");
+  await expect(tour.getByRole("button", { name: "Skip tour", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(next).toBeFocused();
+  await next.click();
+  await next.click();
+  await tour.getByRole("button", { name: "Explore DataFlow", exact: true }).click();
 
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export current version" })).toBeVisible();

@@ -24,7 +24,7 @@ async function expectNoPageOverflow(page: Page) {
 async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.evaluate(() => document.fonts.ready);
   const screenshotPath = testInfo.outputPath(`${name}.png`);
-  await page.screenshot({ path: screenshotPath, fullPage: true, animations: "disabled" });
+  await page.screenshot({ path: screenshotPath, fullPage: true, animations: "disabled", scale: "css" });
   await testInfo.attach(name, { path: screenshotPath, contentType: "image/png" });
 }
 
@@ -71,6 +71,8 @@ test("workspace navigation, responsive layout, and persistent themes remain usab
   await page.getByRole("button", { name: "Preview impact", exact: true }).click();
   await expect(page.locator(".comparison")).toContainText("6 rows");
   await expect(page.locator(".comparison")).toContainText("5 rows");
+  await expect(page.locator(".comparison")).toContainText("1 row removed");
+  await expect(page.locator(".comparison")).toContainText("1 missing value remains");
   await expectNoPageOverflow(page);
   if (!isMobile) await capture(page, testInfo, "transformations-dark-desktop");
 
@@ -105,6 +107,30 @@ test("workspace navigation, responsive layout, and persistent themes remain usab
   if (await skipTour.isVisible()) await skipTour.click();
   await page.getByRole("button", { name: "Switch to dark theme", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+  const tourTrigger = page.getByRole("button", { name: "Guided tour", exact: true });
+  await tourTrigger.click();
+  const tour = page.getByRole("dialog", { name: "Start with trustworthy data", exact: true });
+  await expect(tour.getByRole("button", { name: "Next", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(tour).toBeHidden();
+  await expect(tourTrigger).toBeFocused();
+
+  const menu = page.getByRole("button", { name: "Open menu", exact: true });
+  if (isMobile) await menu.click();
+  const connect = page.getByRole("button", { name: "Connect API", exact: true });
+  await connect.click();
+  const connection = page.getByRole("dialog", { name: "Connect to the production workflow", exact: true });
+  await expect(connection.getByRole("textbox", { name: "Name", exact: true })).toBeFocused();
+  const submit = connection.getByRole("button", { name: "Create and connect", exact: true });
+  await submit.focus();
+  await page.keyboard.press("Tab");
+  await expect(connection.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(submit).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(connection).toBeHidden();
+  await expect(isMobile ? menu : connect).toBeFocused();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(runtimeErrors).toEqual([]);
 });

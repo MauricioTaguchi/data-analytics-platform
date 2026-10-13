@@ -12,7 +12,8 @@
   --border: #ffffff14;
   --border-strong: #ffffff24;
   --primary: #e54d5e;
-  --primary-hover: #ca3549;
+  --primary-button: #c73549;
+  --primary-hover: #ad2639;
   --focus: #ff97a3;
   --success: #64d99c;
   --success-bg: #162b24;
@@ -39,6 +40,7 @@
   --border: #e2e5eb;
   --border-strong: #c9cfda;
   --primary: #c73549;
+  --primary-button: #c73549;
   --primary-hover: #ad2639;
   --focus: #ad2639;
   --success: #14794c;
@@ -66,7 +68,7 @@
 .sidebar-nav { display: grid; gap: 25px; padding-top: 14px; }
 .nav-group { display: grid; gap: 4px; }
 .nav-group-label { padding: 0 12px 8px; color: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase; margin: 0; }
-.nav-item { position: relative; display: flex; justify-content: flex-start; gap: 12px; width: 100%; padding: 12px; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; font-weight: 500; font-size: 12px; }
+.nav-item { position: relative; display: flex; justify-content: flex-start; gap: 12px; width: 100%; padding: 12px; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; font-weight: 500; font-size: 13px; }
 .nav-item:hover { color: var(--text); background: var(--surface-raised); }
 .nav-item.active { color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); border-color: color-mix(in srgb, var(--primary) 15%, transparent); }
 .nav-item.active::before { content: ""; position: absolute; left: -1px; height: 24px; width: 2px; background: var(--primary); border-radius: 2px; }
@@ -254,9 +256,9 @@ td { color: var(--muted); }
 /* Compact console controls and data panels */
 body { line-height: 1.45; }
 h1 { font-size: 27px; margin: 0; font-weight: 650; letter-spacing: -.7px; }
-button, .file-button { gap: 7px; font-size: 11px; min-height: 36px; font-weight: 600; border-radius: 8px; }
+button, .file-button { gap: 7px; font-size: 12px; min-height: 36px; font-weight: 600; border-radius: 8px; }
 button svg { flex: none; }
-.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }
 .secondary { color: var(--text); background: var(--surface); border-color: var(--border-strong); }
 .secondary:hover { background: var(--surface-raised); }
 .file-button { position: relative; overflow: hidden; }
@@ -270,8 +272,8 @@ button svg { flex: none; }
 .menu-button { display: none; }
 .overview-grid, .work-grid { gap: 18px; align-items: start; }
 .panel-header { padding: 16px; min-height: 68px; border-bottom-color: var(--border); }
-.panel-header h2 { font-size: 13px; font-weight: 600; }
-.panel-header p { font-size: 10px; line-height: 1.6; }
+.panel-header h2 { font-size: 14px; font-weight: 600; }
+.panel-header p { font-size: 11px; line-height: 1.6; }
 .preview-panel { overflow: hidden; }
 .preview-toolbar { align-items: center; }
 .preview-toolbar h2 { display: flex; align-items: center; gap: 8px; }
@@ -279,19 +281,19 @@ button svg { flex: none; }
 .preview-search { display: flex; align-items: center; gap: 7px; max-width: 180px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 7px; color: var(--muted); background: var(--background); }
 .preview-search svg { flex: none; }
 .preview-search:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-.column-search { border: 0; padding: 8px 0; width: 100%; min-width: 0; background: transparent; color: var(--text); font-size: 10px; }
+.column-search { border: 0; padding: 8px 0; width: 100%; min-width: 0; background: transparent; color: var(--text); font-size: 12px; }
 .column-search:focus-visible { outline: 0; }
 input::placeholder { color: var(--muted); opacity: 1; }
 .table-scroll { min-height: 306px; scrollbar-color: var(--border-strong) transparent; }
 .table-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.preview-table { min-width: 830px; font-size: 10px; }
+.preview-table { min-width: 830px; font-size: 12px; }
 .preview-table th, .preview-table td { padding: 12px 13px; }
 .preview-table th { background: var(--surface-raised); }
 .preview-table td { color: var(--text); }
 .preview-table tbody tr:hover { background: var(--surface-raised); }
 .preview-row-number { width: 36px; text-align: center; color: var(--muted) !important; border-right: 1px solid var(--border); }
-.column-heading { font-size: 10px; font-weight: 500; }
-.column-type { font-size: 9px; }
+.column-heading { font-size: 11px; font-weight: 500; }
+.column-type { font-size: 10px; }
 .null-value { padding: 2px 5px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 9px; }
 .table-footer { align-items: center; gap: 10px; padding: 12px 16px; font-size: 10px; min-height: 54px; border-top: 1px solid var(--border); }
 .preview-pagination { display: flex; align-items: center; gap: 8px; }
@@ -327,7 +329,7 @@ input::placeholder { color: var(--muted); opacity: 1; }
 .work-grid { margin-top: 0; }
 .work-main { gap: 18px; }
 .transform-layout { grid-template-columns: 175px minmax(0, 1fr); }
-.operation-list button { font-size: 10px; }
+.operation-list button { font-size: 12px; }
 .operation-list button.selected { background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary); }
 .operation-config { padding: 20px; }
 .button-row { flex-wrap: wrap; }
@@ -380,8 +382,8 @@ input::placeholder { color: var(--muted); opacity: 1; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
-  .sidebar { transform: translateX(-100%); transition: transform .2s ease; width: 260px; }
-  .sidebar.open { transform: translateX(0); box-shadow: 10px 0 30px #0006; }
+  .sidebar { visibility: hidden; transform: translateX(-100%); transition: transform .2s ease; width: 260px; }
+  .sidebar.open { visibility: visible; transform: translateX(0); box-shadow: 10px 0 30px #0006; }
   .sidebar-mobile-close { display: inline-flex; padding: 4px; width: 26px; min-height: 28px; background: transparent; color: var(--muted); }
   .mobile-nav-backdrop { display: block; position: fixed; inset: 0; z-index: 25; border: 0; border-radius: 0; background: #0009; }
   .workspace { margin-left: 0; padding-inline: 16px; }
