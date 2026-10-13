@@ -94,7 +94,7 @@
 .topbar-tools { display: flex; align-items: center; gap: 14px; }
 .dataset-heading { padding: 28px 0 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .title-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.dataset-heading p { margin-top: 7px; font-size: 12px; }
+.dataset-heading p { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
 .top-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .connected { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--success-border); background: var(--success-bg); color: var(--success); font-size: 9px; text-transform: uppercase; letter-spacing: .35px; font-weight: 650; white-space: nowrap; }
 .connected.demo { border-color: var(--border-strong); background: var(--surface); color: var(--muted); }
@@ -273,7 +273,7 @@ button svg { flex: none; }
 .overview-grid, .work-grid { gap: 18px; align-items: start; }
 .panel-header { padding: 16px; min-height: 68px; border-bottom-color: var(--border); }
 .panel-header h2 { font-size: 14px; font-weight: 600; }
-.panel-header p { font-size: 11px; line-height: 1.6; }
+.panel-header p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .preview-panel { overflow: hidden; }
 .preview-toolbar { align-items: center; }
 .preview-toolbar h2 { display: flex; align-items: center; gap: 8px; }

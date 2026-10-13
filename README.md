@@ -61,6 +61,8 @@ The one-shot migration service must finish successfully before the API, worker, 
 
 ## The workspace
 
+The console groups data preparation, delivery, and operations in one responsive navigation. Dark and light themes share the same controls, and the selected theme persists in the browser. Tables paginate the loaded preview; quality indicators explicitly describe those preview rows rather than claiming full-dataset validation.
+
 | Workspace | What you can do |
 | --- | --- |
 | **Overview** | Review the active dataset, quality indicators, and recent work. |
@@ -145,7 +147,7 @@ pnpm test:e2e
 | Backend tests | Operation contracts, data quality, immutable source data, publication, idempotency, quotas, and API behavior. |
 | PostgreSQL tests | Locking and concurrency behavior against a real database in CI. |
 | Process integration | API restart, publisher network interruption, duplicate delivery, and worker death after file rename, with eager mode disabled. |
-| Frontend and browser tests | Request recovery and desktop/mobile workflows, including a live upload-to-undo journey. |
+| Frontend and browser tests | Request recovery, preview pagination and missing-value accuracy, keyboard focus, persistent themes, and desktop/mobile workflows, including a live upload-to-undo journey. |
 | Repository checks | Migrations, lint, type checks, backend and targeted frontend coverage gates, dependency audits/review, and CodeQL. |
 
 The fast backend suite uses eager task execution. The process suite requires disposable PostgreSQL and Redis services and must be run explicitly; see [Real process integration](CONTRIBUTING.md#real-process-integration). A skipped process suite does not verify recovery. Coverage thresholds are quality gates, not capacity benchmarks.
