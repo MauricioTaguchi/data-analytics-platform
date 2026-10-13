@@ -189,7 +189,17 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Run live API journey
         working-directory: frontend
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/dataflow-live-review/artifacts/ui
         run: pnpm exec playwright test e2e/live-api-workflow.spec.ts --project=chromium
+      - name: Upload live workflow UI evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: live-workflow-ui-evidence
+          path: ${{ runner.temp }}/dataflow-live-review/artifacts/ui
+          if-no-files-found: warn
+          retention-days: 14
       - name: Print API diagnostics after a failure
         if: failure()
         run: cat /tmp/dataflow-api.log

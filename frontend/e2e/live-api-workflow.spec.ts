@@ -13,7 +13,7 @@ async function openSection(page: Page, name: string) {
   await page.getByRole("navigation", { name: "Workspace", exact: true }).getByRole("button", { name, exact: true }).click();
 }
 
-liveTest("authenticated workflow persists transformations and undo before dashboard and PDF report", async ({ page }) => {
+liveTest("authenticated workflow persists transformations and undo before dashboard and PDF report", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   page.setDefaultTimeout(15_000);
   const email = `reviewer-${Date.now()}-${test.info().retry}@example.com`;
@@ -63,12 +63,14 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   await page.getByRole("button", { name: "Evaluate saved contract", exact: true }).click();
   const evidence = page.getByRole("region", { name: "Quality evaluation evidence", exact: true });
   await expect(evidence).toContainText("1 of 1 rules passed", { timeout: 30_000 });
-  await page.screenshot({ path: test.info().outputPath("live-quality-evidence.png"), fullPage: true });
+  const qualityScreenshot = testInfo.outputPath("live-quality-evidence.png");
+  await page.screenshot({ path: qualityScreenshot, fullPage: true });
+  await testInfo.attach("Live quality evaluation evidence", { path: qualityScreenshot, contentType: "image/png" });
 
   await openSection(page, "Transformations");
   await expect(page.getByRole("button", { name: "Remove columns", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Rename column", exact: true }).click();
-  await page.getByLabel(/^Column/).selectOption("customer");
+  await page.getByLabel("Column", { exact: true }).selectOption("customer");
   await page.getByLabel("Parameter", { exact: true }).fill("customer_name");
   await page.getByRole("button", { name: "Apply transformation" }).click();
   await expect(page.getByText("The version-controlled transformation completed successfully.")).toBeVisible({ timeout: 30_000 });
@@ -82,7 +84,9 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   await expect(snapshots).toContainText("SHA-256 recorded");
   await snapshots.locator("li").filter({ hasText: "Undo target" }).getByRole("button", { name: "Pin snapshot", exact: true }).click();
   await expect(snapshots.getByRole("button", { name: "Unpin snapshot", exact: true })).toBeVisible();
-  await page.screenshot({ path: test.info().outputPath("live-snapshot-history.png"), fullPage: true });
+  const snapshotScreenshot = testInfo.outputPath("live-snapshot-history.png");
+  await page.screenshot({ path: snapshotScreenshot, fullPage: true });
+  await testInfo.attach("Live snapshot retention evidence", { path: snapshotScreenshot, contentType: "image/png" });
 
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export current version" }).click();
