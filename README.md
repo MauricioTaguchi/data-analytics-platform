@@ -16,6 +16,8 @@ Upload, inspect, transform, undo, and publish analytics from one workspace.
 
 ![DataFlow analytics workspace showing the built-in demo](docs/assets/dashboard-preview.png)
 
+[Light theme](docs/assets/dashboard-light.png) · [Mobile layout](docs/assets/workspace-mobile.png)
+
 </div>
 
 **DataFlow is a data analytics platform built around traceable, reversible work.** Analysts can explore data quality, preview changes, build dashboards, and generate reports. The backend makes dataset revisions, background jobs, audit events, and recovery explicit, so the same workflow can be inspected and tested beyond the interface.
