@@ -6,9 +6,10 @@ from sqlalchemy import and_, or_, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.telemetry import correlation_id
 from app.models.job import JobRecord
 from app.models.task_outbox import TaskOutbox
-from app.services.job_service import JobStateConflict, _normalized, database_now
+from app.services.job_service import JobService, JobStateConflict, _normalized, database_now
 
 
 # A publication acknowledgement is not proof that a worker received the task.
@@ -21,7 +22,7 @@ class OutboxService:
         event = TaskOutbox(
             task_id=task_id,
             kind=kind,
-            payload_json={"args": args},
+            payload_json={"args": args, "correlation_id": correlation_id() or task_id},
             status="PENDING",
         )
         db.add(event)
@@ -97,6 +98,7 @@ class OutboxService:
             transform_dataset_task,
         )
         from app.tasks.report_tasks import generate_report_task
+        from app.tasks.quality_tasks import evaluate_quality_task
 
         tasks = {
             "import": import_dataset_task,
@@ -104,6 +106,7 @@ class OutboxService:
             "transformation-preview": preview_transformation_task,
             "transformation": transform_dataset_task,
             "report": generate_report_task,
+            "quality-evaluation": evaluate_quality_task,
         }
         return tasks[kind]
 
@@ -141,6 +144,7 @@ class OutboxService:
             (task or cls._task_for_kind(event["kind"])).apply_async(
                 args=list(event["payload_json"].get("args", [])),
                 task_id=event["task_id"],
+                headers={"correlation_id": event["payload_json"].get("correlation_id", event["task_id"])},
             )
         except Exception as exc:
             error = exc
@@ -285,6 +289,7 @@ class OutboxService:
                 job.updated_at = check_time
                 # Flush the terminal job before cancelling its publication.
                 db.flush()
+                JobService._complete_quality_evaluation(db, job.task_id, status="error", now=check_time)
                 cls.cancel(db, job.task_id)
                 outcome["failed"].append(job.task_id)
                 continue

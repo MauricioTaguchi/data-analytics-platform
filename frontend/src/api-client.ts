@@ -1,6 +1,6 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
 
-import type { DataOperation, DataRow } from "./data-utils";
+import type { DataRow } from "./data-utils";
 
 
 const LOCAL_API_URL = "http://localhost:8000/api/v1";
@@ -72,7 +72,8 @@ export type JobStatus = {
 
 export type TransformationResult = {
   id: number;
-  operation: DataOperation;
+  operation: string;
+  operation_version?: string;
   parameters: Record<string, unknown>;
   before_rows: number;
   after_rows: number;
@@ -372,12 +373,14 @@ export async function reconcileCreatedJob(taskId: string, signal?: AbortSignal) 
 
 export async function previewDatasetTransformation(
   datasetId: number,
-  operation: DataOperation,
+  operation: string,
   parameters: object,
   expectedVersion: number,
   taskId: string,
+  engine?: string,
 ) {
   const response = await apiClient.post<JobStatus>(`/datasets/${datasetId}/transform/preview`, {
+    engine,
     operation,
     parameters,
     expected_version: expectedVersion,
@@ -387,10 +390,11 @@ export async function previewDatasetTransformation(
 
 export async function applyDatasetTransformation(
   datasetId: number,
-  operation: DataOperation,
+  operation: string,
   parameters: object,
   expectedVersion: number,
   taskId: string,
+  engine?: string,
 ) {
   const response = await apiClient.post<{
     transformation_id: number;
@@ -399,7 +403,7 @@ export async function applyDatasetTransformation(
     reused: boolean;
   }>(
     `/datasets/${datasetId}/transform`,
-    { operation, parameters, expected_version: expectedVersion },
+    { operation, parameters, expected_version: expectedVersion, engine },
     { headers: { "Idempotency-Key": taskId, "X-Task-ID": taskId } },
   );
   return response.data;
@@ -550,4 +554,37 @@ export function isRequestCancelled(error: unknown) {
   return axios.isCancel(error)
     || (axios.isAxiosError(error) && error.code === "ERR_CANCELED")
     || (error instanceof DOMException && error.name === "AbortError");
+}
+
+export async function fetchOperationCatalog(signal?: AbortSignal) {
+  const response = await apiClient.get<import("./operation-contracts").OperationDefinition[]>("/datasets/operations", { signal });
+  if (!Array.isArray(response.data) || !response.data.length || response.data.some((item) => !item.operation || !item.semantic_version || !item.parameters_schema || !item.engines || !Object.keys(item.engines).length)) throw new Error("The API returned an invalid operation catalog.");
+  return response.data;
+}
+
+export type DatasetSnapshot = { id: string | null; version: number | null; sha256: string | null; size_bytes: number | null; integrity: "verified" | "unverified"; availability: "AVAILABLE" | "EXPIRED"; pinned: boolean; active: boolean; restorable: boolean; created_at: string | null; expired_at: string | null };
+
+export async function fetchDatasetSnapshots(datasetId: number, signal?: AbortSignal) {
+  return (await apiClient.get<DatasetSnapshot[]>(`/datasets/${datasetId}/snapshots`, { signal })).data;
+}
+
+export async function pinDatasetSnapshot(datasetId: number, snapshotId: string, pinned: boolean) {
+  return (await apiClient.patch<DatasetSnapshot>(`/datasets/${datasetId}/snapshots/${snapshotId}`, { pinned })).data;
+}
+
+export type QualityRule = { id: string; kind: "not_null" | "unique" | "range" | "accepted_values" | "schema"; column?: string; min?: number | null; max?: number | null; values?: Array<string | number | boolean | null>; expected_schema?: Record<string, string>; allow_extra_columns?: boolean };
+export type QualityContract = { id: number; dataset_id: number; version: number; name: string; rules: QualityRule[]; created_at: string };
+export type QualityEvaluation = { id: number; contract_id: number; contract_version: number; dataset_version: number; snapshot_sha256: string | null; status: string; passed: boolean | null; task_id?: string; error_message?: string | null; created_at: string; completed_at: string | null; stale: boolean; result: { row_count: number; rule_count: number; passed_count: number; failed_count: number; rules: Array<{ rule_id: string; kind: string; column?: string; passed: boolean; checked_count: number; violation_count: number; message: string }> } | null };
+
+export async function fetchQualityContracts(datasetId: number, signal?: AbortSignal) {
+  return (await apiClient.get<QualityContract[]>(`/datasets/${datasetId}/quality/contracts`, { signal })).data;
+}
+export async function saveQualityContract(datasetId: number, name: string, rules: QualityRule[], expectedContractVersion: number, signal?: AbortSignal) {
+  return (await apiClient.post<QualityContract>(`/datasets/${datasetId}/quality/contracts`, { name, rules, expected_contract_version: expectedContractVersion }, { signal })).data;
+}
+export async function fetchQualityEvaluations(datasetId: number, signal?: AbortSignal) {
+  return (await apiClient.get<QualityEvaluation[]>(`/datasets/${datasetId}/quality/evaluations`, { signal })).data;
+}
+export async function startQualityEvaluation(datasetId: number, contractId: number, expectedVersion: number, taskId: string, signal?: AbortSignal) {
+  return (await apiClient.post<{ evaluation_id: number; task_id: string; status: string; reused: boolean }>(`/datasets/${datasetId}/quality/evaluations`, { contract_id: contractId, expected_version: expectedVersion }, { headers: { "Idempotency-Key": taskId, "X-Task-ID": taskId }, signal })).data;
 }

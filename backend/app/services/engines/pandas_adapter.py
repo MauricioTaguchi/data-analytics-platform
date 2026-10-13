@@ -7,18 +7,26 @@ from .contracts import Checkpoint, MaterializedArtifact, ResourcePolicy, Snapsho
 
 
 class PandasEngineAdapter:
-    """Bridge to existing format readers and guarded writers without a service import cycle."""
+    """Supervised by default; explicit callbacks provide an injectable local adapter.
+
+    Production callers construct this without callbacks. The child and targeted
+    tests inject the pure reader/handler/writer dependencies explicitly.
+    """
 
     name = "pandas"
 
     def __init__(
         self,
         *,
-        read: Callable[..., Any],
-        transform: Callable[..., Any],
-        validate: Callable[..., Any],
-        write: Callable[..., Any],
+        read: Callable[..., Any] | None = None,
+        transform: Callable[..., Any] | None = None,
+        validate: Callable[..., Any] | None = None,
+        write: Callable[..., Any] | None = None,
     ) -> None:
+        if any(item is not None for item in (read, transform, validate, write)) and not all(
+            item is not None for item in (read, transform, validate, write)
+        ):
+            raise ValueError("An injected Pandas adapter requires all four dependencies.")
         self._read = read
         self._transform = transform
         self._validate = validate
@@ -32,6 +40,11 @@ class PandasEngineAdapter:
         policy: ResourcePolicy,
         checkpoint: Checkpoint | None = None,
     ) -> MaterializedArtifact:
+        if self._read is None:
+            from .runner import run_native
+
+            return run_native(self.name, snapshot, plan, output_path, policy, checkpoint)
+        assert self._transform is not None and self._validate is not None and self._write is not None
         validate_paths(snapshot.path, output_path)
         if checkpoint:
             checkpoint()
@@ -39,7 +52,7 @@ class PandasEngineAdapter:
         before_rows, before_columns = before.shape
         if checkpoint:
             checkpoint()
-        after = self._transform(before, plan.operation, dict(plan.parameters))
+        after = self._transform(before, plan.operation, dict(plan.parameters), version=plan.operation_version)
         # The operation owns its result; release the source frame before Arrow
         # allocates serialization buffers for the immutable output snapshot.
         del before
@@ -64,5 +77,5 @@ class PandasEngineAdapter:
             size_bytes=size,
             sha256=digest,
             engine=self.name,
-            semantics="pandas-v1",
+            semantics=f"pandas:{plan.operation}@{plan.operation_version}",
         )

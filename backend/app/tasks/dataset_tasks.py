@@ -8,6 +8,8 @@ from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.transformation import Transformation
 from app.services.dataset_service import DatasetService
+from app.services.engines import ResourcePolicy, SnapshotRef
+from app.services.engines.runner import run_inspection, run_profile
 from app.core.config import settings
 from app.services.artifact_service import ArtifactService
 from app.services.job_service import (
@@ -237,7 +239,10 @@ def import_dataset_task(self, dataset_id: int):
         )
         dataset_snapshot = SimpleNamespace(stored_path=str(dataset.stored_path))
         db.commit()
-        dimensions = DatasetService.inspect_staged_dataset(dataset_snapshot)
+        dimensions = run_inspection(
+            SnapshotRef(Path(dataset_snapshot.stored_path)), ResourcePolicy.configured(),
+            checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
+        )
         _lease_checkpoint(db, task_id, attempt_token)
         dataset = (
             db.query(Dataset)
@@ -451,7 +456,10 @@ def profile_dataset_task(self, dataset_id: int):
         )
         dataset_snapshot = SimpleNamespace(stored_path=input_path)
         db.commit()
-        profile = DatasetService.build_profile(dataset_snapshot)
+        profile = run_profile(
+            SnapshotRef(Path(dataset_snapshot.stored_path)), ResourcePolicy.configured(),
+            checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
+        )
         JobService.ensure_result_size(profile, label="Dataset profile")
         _lease_checkpoint(db, task_id, attempt_token)
         JobService.lock_owner(db, owner_id)
@@ -570,6 +578,7 @@ def preview_transformation_task(
     parameters: dict,
     expected_version: int,
     engine_name: str = "pandas",
+    operation_version: str = "1.0.0",
 ):
     task_id = str(self.request.id)
     attempt_token = uuid4().hex
@@ -607,7 +616,7 @@ def preview_transformation_task(
         )
         db.commit()
         result = DatasetService.preview_transformation(
-            dataset_snapshot, operation, parameters, engine_name=engine_name,
+            dataset_snapshot, operation, parameters, engine_name=engine_name, operation_version=operation_version,
             output_path=preview_path, quota_remaining_bytes=quota_remaining,
             checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
         )

@@ -36,7 +36,7 @@ class TaskOutbox(Base):
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="ck_task_outbox_attempts_nonnegative"),
         CheckConstraint(
-            "kind IN ('import', 'profile', 'transformation-preview', 'transformation', 'report')",
+            "kind IN ('import', 'profile', 'transformation-preview', 'transformation', 'report', 'quality-evaluation')",
             name="ck_task_outbox_kind",
         ),
         CheckConstraint(

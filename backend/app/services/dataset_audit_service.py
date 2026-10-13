@@ -4,6 +4,7 @@ import json
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
+from app.core.telemetry import correlation_id
 
 from app.models.dataset_event import DatasetEvent
 from app.models.transformation import Transformation
@@ -42,6 +43,7 @@ class DatasetAuditService:
         return {
             "status": "completed",
             "transformation_id": transformation.id,
+            "operation_version": transformation.operation_version,
             "dataset_id": transformation.dataset_id,
             "before_rows": transformation.before_rows,
             "after_rows": transformation.after_rows,
@@ -54,10 +56,9 @@ class DatasetAuditService:
     def record_transformation(
         cls, db: Session, transformation: Transformation, *, artifact: MaterializedArtifact,
     ) -> DatasetEvent:
-        from app.services.operations import operation_definition
-
         receipt = cls.transformation_result(transformation)
         receipt.update(
+            correlation_id=correlation_id() or transformation.task_id,
             result_version=transformation.expected_version + 1,
             engine_name=transformation.engine_name,
             snapshot={
@@ -84,7 +85,7 @@ class DatasetAuditService:
             result_version=transformation.expected_version + 1,
             input_path=transformation.input_path,
             output_path=transformation.output_path,
-            operation_version=operation_definition(transformation.operation).semantic_version,
+            operation_version=transformation.operation_version,
             result_json=receipt,
         )
         db.add(record)
@@ -95,13 +96,16 @@ class DatasetAuditService:
     def record_undo(
         cls, db: Session, transformation: Transformation, *, actor_id: int,
         previous_version: int, idempotency_key: str | None, request_fingerprint: str,
+        snapshot_integrity: str = "unverified", snapshot_id: str | None = None,
     ) -> dict:
         event_id = uuid4().hex
         # Capture a response, not an ORM reference. A later transformation/undo
         # must never change the result returned for this operation's key.
         response = {
+            "correlation_id": correlation_id() or transformation.task_id,
             "id": transformation.id,
             "operation": transformation.operation,
+            "operation_version": transformation.operation_version,
             "parameters": deepcopy(transformation.parameters),
             "status": "undone",
             "task_id": transformation.task_id,
@@ -115,6 +119,8 @@ class DatasetAuditService:
             "event_id": event_id,
             "previous_version": previous_version,
             "result_version": previous_version + 1,
+            "snapshot_integrity": snapshot_integrity,
+            "snapshot_id": snapshot_id,
         }
         db.add(DatasetEvent(
             id=event_id,
@@ -142,6 +148,7 @@ class DatasetAuditService:
         if event is not None:
             return {
                 "task_id": task_id, "status": "SUCCESS", "progress": 100,
+                "correlation_id": event.result_json.get("correlation_id"),
                 "stage": "completed", "error_message": None,
                 "result": deepcopy(event.result_json),
             }

@@ -2,7 +2,7 @@
 set -eu
 
 alembic upgrade head
-celery -A app.worker.celery_app worker --loglevel=info &
+celery -A app.worker.celery_app worker --loglevel=info --queues interactive,bulk &
 worker_pid=$!
 python -m app.scheduler &
 scheduler_pid=$!

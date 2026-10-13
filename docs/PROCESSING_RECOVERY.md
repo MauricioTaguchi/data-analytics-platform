@@ -61,11 +61,21 @@ Failed imports persist deletion intent before cleanup. Collection first commits
 to retry. Tombstones remain and are revisited to remove files written by a delayed
 attempt after an earlier cleanup pass. Live references and active attempts remain
 protected. Tombstones grow with attempts; do not purge them without a separately
-enforced upper bound on old writer lifetime. Historical snapshots are retained for
-lineage/UNDO and are not considered orphans. A legacy grace-period sweep remains
+enforced upper bound on old writer lifetime. Available historical snapshots are retained for
+lineage/UNDO and are not considered orphans. Opt-in snapshot retention marks only
+eligible old manifests expired and schedules their bytes for collection while
+retaining audit metadata; legacy files are never expired automatically. A legacy grace-period sweep remains
 for files created before reservation support, including interrupted uploads.
 
 ## Upgrading an existing installation
+
+The current migration head is `20261013_0015`. The chain adds audit receipts
+(`0011`), snapshot manifests and PostgreSQL mutation guards (`0012`), persisted
+operation versions (`0013`), quality contracts/evidence (`0014`), and durable job
+correlation (`0015`). New snapshots are recorded from origin; legacy bytes are not
+assigned fabricated hashes. Retention defaults to disabled. Drain and stop old
+API/workers/schedulers for this upgrade even when an individual migration does
+not enforce a drain itself.
 
 Migration `20260908_0010` rejects active jobs or pending transformations. This is
 an intentional deployment gate: an old worker must not publish with the old
@@ -74,7 +84,7 @@ above both their current value and their historical maximum. File contents and
 transformation history remain intact.
 
 1. Stop admitting new requests. On a local Compose installation, close the UI and
-   stop `web` and `api`. Keep the existing worker, scheduler, database, and Redis
+   stop `web` and `api`. Keep all existing workers, scheduler, database, and Redis
    running until accepted jobs reach terminal states. If cancelling work, do that
    through the application before stopping the API.
 2. Check for remaining work:
@@ -87,8 +97,8 @@ transformation history remain intact.
    Both queries must return zero rows. If a previous outage left work behind,
    recover/cancel it with the existing version before continuing. Do not bypass
    the migration gate by manually marking live jobs complete.
-3. Stop the old worker and scheduler, then back up the database and both file
-   volumes together using the existing operations procedure. Check out the new
+3. Stop both old workers and the scheduler, then back up the database and both
+   file volumes together using [the coordinated backup procedure](DISASTER_RECOVERY.md). Check out the new
    release/branch after confirming there are no uncommitted local changes.
 4. Build, migrate, and start:
 
@@ -99,8 +109,9 @@ transformation history remain intact.
    docker compose ps
    ```
 
-5. Reload the UI so it fetches current revisions. Confirm an upload,
-   transformation, and UNDO complete. Check `docker compose logs scheduler worker`
+5. Apply/review runtime-role grants with separate migration credentials, and confirm both
+   `interactive` and `bulk` queues have consumers. Reload the UI so it fetches current revisions. Confirm an upload,
+   transformation, and UNDO complete. Check `docker compose logs scheduler worker interactive-worker`
    for repeated failures. A failed migration leaves the application stopped for
    investigation; do not start new code against an old schema.
 
@@ -113,8 +124,9 @@ cutover; prefer a forward fix.
 The adapter contract is `SnapshotRef + TransformationPlan + ResourcePolicy ->
 MaterializedArtifact`. DataFrames stay inside the adapter. The worker owns leases,
 cancellation, quota revalidation, artifact publication, and database commits.
-The engine name is persisted when a transformation or preview is admitted, so a
-retry does not silently switch engines after configuration changes. Requests can
+The engine name and operation semantic version are pinned when a transformation
+or preview is admitted. Released handlers remain registered, so queued work does
+not silently change semantics after a new default is deployed. Requests can
 provide `engine` explicitly. `GET /api/v1/datasets/operations` exposes the typed
 parameter contracts and the supported engine/input pairs.
 
@@ -126,7 +138,7 @@ Pandas reads before/after materialization; native preview is not fully streaming
 
 | Engine | Supported input | Operations in this release | Execution |
 | --- | --- | --- | --- |
-| Pandas (default) | CSV, Excel, JSON, Parquet | Existing transformation operations | Existing bounded eager processing |
+| Pandas (default) | CSV, Excel, JSON, Parquet | Catalog operations | Bounded eager frames in a supervised subprocess |
 | Polars | Parquet | `drop_columns`, `rename_columns` | Lazy scan and streaming Parquet sink |
 | DuckDB | Parquet | `drop_columns`, `rename_columns` | Compiled projection and direct Parquet output |
 
@@ -137,7 +149,7 @@ Ingestion, profiling, preview summaries and reports still use bounded Pandas
 paths; this change does not enable unlimited uploads. Dataset pagination over
 Parquet projects columns and visits only the needed row groups.
 
-For local Python development, install the optional pinned engines:
+DuckDB is a pinned core dependency for dashboard queries; Pandas remains the default transformation engine. For local development with all native transformation adapters, install the pinned engine set:
 
 ```bash
 pip install -r requirements-engines.txt
@@ -156,7 +168,7 @@ Keep using both Compose files when rebuilding that installation. Configure
 the worker's actual capacity. The default remains `pandas` without optional
 dependencies. Changing the setting affects newly admitted transformations.
 
-Native work starts a fresh interpreter, sets thread limits before importing native
+Supervised dataset work starts a fresh interpreter, sets thread limits before importing native
 libraries, and renews leases at cooperative checkpoints. The supervisor terminates
 the child on cancellation, timeout, or observed resource excess; the child exits
 if the parent lifetime pipe closes. Output file limits are enforced on POSIX.
@@ -169,7 +181,32 @@ before enabling casts, deduplication, or arbitrary analytical SQL.
 
 Compose bounds the worker container to 2 GiB and 2 CPUs by default. Set
 `DATAFLOW_WORKER_MEMORY_LIMIT` and `DATAFLOW_WORKER_CPUS` in the Compose environment
-to change these limits. They bound the whole worker, including child processes;
-Pandas does not yet have a per-attempt RSS watchdog. An OOM kill can terminate a
+to change these limits. They bound the whole worker, including child processes.
+The interactive worker has its own 1 GiB/1 CPU defaults, configurable with
+`DATAFLOW_INTERACTIVE_MEMORY_LIMIT` and `DATAFLOW_INTERACTIVE_CPUS`. Pandas now uses
+the same sampled per-attempt RSS watchdog as other supervised dataset work. An OOM kill can terminate a
 worker and relies on the durable recovery path. Validate capacity with your data
 before increasing concurrency.
+
+## Integrity, retention and operational evidence
+
+Undo compares a manifest-backed target's original SHA-256 and size outside row
+locks, then fences its identity and logical availability before committing. A
+corrupt, missing or expired target yields a conflict without changing the head.
+Legacy targets report `unverified`. See [Snapshot integrity](SNAPSHOT_INTEGRITY.md).
+
+Keep `SNAPSHOT_RETENTION_DAYS=0` until the history window has been reviewed. With
+retention enabled, pins, recent snapshots, active heads and datasets with pending,
+running or cancelling jobs are protected. Expiration retains events/manifests;
+physical deletion is deferred through the durable collector. An expired undo target
+cannot be recovered without a separately retained backup.
+
+Quality evaluations preserve their admitted contract and revision. A result can
+complete for an older snapshot and be marked stale after a head change; it must not
+be presented as evidence for the new head. See [Quality contracts](DATA_QUALITY.md).
+
+The protected processing endpoint reports durable queue age, outbox lag, retained
+job statistics, fresh process heartbeats and disk observations. Persisted correlation
+IDs connect admission, dispatch, workers and results. Use these signals alongside
+logs and synthetic processing checks; they are not full distributed traces or proof
+of task consumption. See [Operations](OPERATIONS.md) for alert integration.

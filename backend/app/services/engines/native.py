@@ -139,5 +139,5 @@ def materialize_in_child(
         size_bytes=size,
         sha256=digest,
         engine=engine,
-        semantics="projection-v1",
+        semantics=f"projection:{plan.operation}@{plan.operation_version}",
     )

@@ -39,7 +39,7 @@ INTEGRATION_LOG_DIR=/tmp/dataflow-integration-logs \
 python -m pytest integration -v --tb=short
 ```
 
-The harness requires POSIX process groups and signals. It runs Alembic in an isolated schema, starts the API, a prefork Celery worker and two scheduler processes, and forces `CELERY_EAGER=false`. It checks API restart, publisher network partition, duplicate broker delivery, and worker death after filesystem rename. Cleanup targets that run's schema and Redis key prefix. Without both service URLs, or on non-POSIX systems, these tests **skip**; a skipped run does not verify process recovery. The standard `pytest` command discovers `tests/`, so run `integration/` explicitly and include the result and process logs in the PR.
+The harness requires POSIX process groups and signals. It runs Alembic in an isolated schema, starts the API, a prefork Celery worker and two scheduler processes, and forces `CELERY_EAGER=false`. It checks API restart, publisher network partition, duplicate broker delivery, worker death after filesystem rename, and checksum/direct-SQL integrity guards after real migrations. Cleanup targets that run's schema and Redis key prefix. Without both service URLs, or on non-POSIX systems, these tests **skip**; a skipped run does not verify process recovery. The standard `pytest` command discovers `tests/`, so run `integration/` explicitly and include the result and process logs in the PR.
 
 ### Frontend checks
 
@@ -47,6 +47,7 @@ The harness requires POSIX process groups and signals. It runs Alembic in an iso
 cd frontend
 corepack enable
 pnpm install --frozen-lockfile
+pnpm exec eslint src --ext .ts,.tsx --max-warnings 0
 pnpm typecheck
 pnpm test
 pnpm build
@@ -54,7 +55,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-CI first installs application dependencies from the frozen lockfile, then installs exact, non-persisted ESLint and coverage-tool versions in its disposable workspace. The second step remains registry-dependent while those quality tools are outside the application lockfile; moving them into the lockfile is the intended long-term reproducibility improvement.
+ESLint, TypeScript ESLint and the Vitest coverage provider are declared development dependencies in `frontend/package.json` and resolved in `pnpm-lock.yaml`. Install with the frozen lockfile; do not add untracked quality tools during CI. Dependency installation still needs a registry or a populated package cache.
 
 ### Full-stack smoke test
 
@@ -67,11 +68,20 @@ Confirm `/health/live`, `/health/ready`, and one upload-to-report journey before
 
 ## Adding transformations and engines
 
-1. Add the parameter model and `OperationDefinition` in `backend/app/services/operations.py`. Keep `extra="forbid"`, validate literal column names, and declare supported engines/formats and invariants accurately. `TransformationRequest` in `backend/app/schemas/dataset.py` validates through this catalog; clients can discover it at `GET /api/v1/datasets/operations`.
-2. Implement Pandas behavior in `DatasetService.apply_operation` in `backend/app/services/dataset_service.py`; use `backend/app/services/safe_cast.py` for checked conversions. Native projections share `TransformationPlan.validate_schema` in `backend/app/services/engines/contracts.py` and execute in `engines/native.py`. For a new engine, implement `TransformationEngineAdapter`, register it in `engines/__init__.py`, and update the catalog, configuration, request engine type and dependency file. Review `engines/runner.py` when adding native execution modes.
-3. Keep frames inside adapters. An engine consumes `SnapshotRef`, `TransformationPlan` and `ResourcePolicy` and returns `MaterializedArtifact`; publication, audit events, leases and transactions remain in the service layer. Preserve immutable input bytes, respect checkpoints and budgets, and reject unsupported semantics during the shared preflight used by preview and admission. Retain output verification because metadata preflight cannot prove every runtime conversion is lossless.
-4. Treat an operation's `semantic_version` as a documented contract. The current catalog reports the current contract; it is not a persisted historical executor selector. A future incompatible change must preserve old pending-job behavior or introduce explicit version binding and migration before deployment. An omitted engine on an idempotent replay must reuse the previously selected engine.
-5. Extend `backend/tests/test_operation_catalog.py`, `test_transformation_engines.py` and relevant data-quality tests. Assert expected values, schema, nulls, row order, immutable source hashes, limits and preflight failures independently of the implementation. Test duplicate delivery and interruption in `backend/integration/test_process_recovery.py` when changing execution or publication. If adding a UI action, update `frontend/src/components/TransformationBuilder.tsx`, `frontend/src/data-utils.ts` and their tests.
+1. Add a strict parameter model and register an `OperationDefinition` in `backend/app/services/operations.py`. Declare engine/format support and invariants accurately. The live frontend reads `GET /api/v1/datasets/operations`; keep unsupported form contracts explicit instead of silently guessing input semantics.
+2. Put Pandas behavior in a versioned handler in `backend/app/services/operation_handlers.py`, using `safe_cast.py` for checked conversions. Released handlers must remain unchanged: add a new handler and semantic version for incompatible behavior. The registry retains older definitions; new admissions choose the current definition, while persisted jobs use their original version.
+3. Native projections use the registered projection handler and `TransformationPlan.validate_schema`. For a new engine, implement `TransformationEngineAdapter`, register it in `engines/__init__.py`, and update the catalog, configuration, engine request type and dependency file. Review the supervisor before adding an execution mode.
+4. Keep frames inside adapters. Inputs are `SnapshotRef`, `TransformationPlan` and `ResourcePolicy`; outputs are `MaterializedArtifact`. Publication, audit, leases and transactions belong to the service layer. Preserve immutable bytes, checkpoints and budgets, and reject unsupported semantics before admission. Extend output verification when conversion semantics change.
+5. Test pending work and idempotent replay across a changed default version, as well as expected values, schema, nulls, row order and resource failure. API/worker changes require PostgreSQL/process scenarios where locking, cancellation or publication matters. Never use SQLite-only tests as proof of row-lock or trigger behavior.
+6. Keep the live operation catalog and demo capabilities distinct. Extend `frontend/src/data-utils.ts` for a new demo implementation and the generic form renderer only when introducing a new parameter-schema shape. Cover user-visible unsupported states and typed values.
+
+## Data, retention and operational changes
+
+Use synthetic fixtures with explicit expected results. Quality evaluations bind a contract version and dataset snapshot, so test stale evidence, cross-tenant access, missing columns, changed schemas and failed checks separately from infrastructure failure. See [Quality contracts](docs/DATA_QUALITY.md).
+
+Snapshot changes must preserve digest provenance, immutable manifest identity, undo fencing, pinning and cancelling-job protection. Retention is disabled by default. PostgreSQL triggers and runtime-role grants require a real migration test; use [Snapshot integrity](docs/SNAPSHOT_INTEGRITY.md) as the contract.
+
+Changes to backup or performance behavior should include reproducible commands and raw evidence. See [Disaster recovery](docs/DISASTER_RECOVERY.md) and [Benchmarks](docs/BENCHMARKS.md). A successful unit test is not a measured RPO/RTO or throughput result. Keep authored interface text, comments and documentation in English.
 
 ## Pull requests
 

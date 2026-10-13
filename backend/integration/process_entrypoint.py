@@ -20,6 +20,7 @@ from app.worker import celery_app
 def configure_celery(app, namespace: str) -> None:
     app.conf.update(
         task_default_queue=namespace,
+        task_routes={},
         broker_transport_options={
             **dict(app.conf.broker_transport_options or {}),
             "global_keyprefix": f"{namespace}:",

@@ -1,4 +1,8 @@
 from pathlib import Path
+import hashlib
+import json
+
+import pyarrow.parquet as pq
 import pandas as pd
 from sqlalchemy.orm import Session
 from app.models.chart import Chart
@@ -6,6 +10,11 @@ from app.models.dashboard import Dashboard
 from app.models.dataset import Dataset
 from app.models.project import Project
 from app.services.dataset_service import DatasetService
+from app.services.chart_cache import chart_cache
+from app.services.chart_filters import apply_filters, column_kind
+from app.services.chart_query import (
+    json_value, query_gate, query_parquet, required_columns, validate_chart,
+)
 
 class DashboardService:
     @staticmethod
@@ -61,31 +70,26 @@ class DashboardService:
         DatasetService.ensure_ready(dataset)
         return dataset
 
+    _apply_filters = staticmethod(apply_filters)
+
     @staticmethod
-    def _apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
-        filtered = df.copy()
-        for column, rule in filters.items():
-            if column not in filtered.columns:
-                continue
-            if isinstance(rule, dict):
-                if "eq" in rule:
-                    filtered = filtered[filtered[column] == rule["eq"]]
-                if "gte" in rule:
-                    filtered = filtered[filtered[column] >= rule["gte"]]
-                if "lte" in rule:
-                    filtered = filtered[filtered[column] <= rule["lte"]]
-                if "contains" in rule:
-                    filtered = filtered[
-                        filtered[column]
-                        .astype(str)
-                        .str.contains(
-                            str(rule["contains"]),
-                            case=False,
-                            na=False,
-                            regex=False,
-                        )
-                    ]
-        return filtered
+    def _cache_key(dataset, chart, owner_id: int) -> str | None:
+        # A revision and immutable path identify the logical data. Stat identity
+        # additionally prevents stale hits after accidental filesystem changes.
+        version = getattr(dataset, "version", None)
+        if version is None:
+            return None
+        path = Path(dataset.stored_path)
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise ValueError("The dataset snapshot is unavailable.") from exc
+        definition = {key: getattr(chart, key) for key in (
+            "chart_type", "title", "x_column", "y_column", "aggregation", "filters_json",
+        )}
+        identity = [owner_id, chart.dataset_id, version, str(path.resolve()),
+                    stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, definition]
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     @classmethod
     def build_chart_data(cls, db: Session, chart: Chart, owner_id: int) -> dict:
@@ -96,16 +100,40 @@ class DashboardService:
             owner_id,
         )
 
-        df = DatasetService.read_dataframe(Path(dataset.stored_path))
+        key = cls._cache_key(dataset, chart, owner_id)
+        if key and (cached := chart_cache.get(key)) is not None:
+            return cached
+        path = Path(dataset.stored_path)
+        with query_gate.acquire():
+            if path.suffix.lower() == ".parquet":
+                DatasetService.preflight_binary_dataset(path)
+                result = query_parquet(path, chart)
+                if result is None:
+                    columns = required_columns(chart, pq.read_schema(path).names)
+                    frame = pd.read_parquet(path, columns=columns)
+                    result = cls._build_pandas_chart(frame, chart)
+            else:
+                frame = DatasetService.read_dataframe(path)
+                result = cls._build_pandas_chart(frame, chart)
+        normalized: dict = json_value(result)
+        if key:
+            chart_cache.put(key, normalized)
+        return normalized
+
+    @classmethod
+    def _build_pandas_chart(cls, df: pd.DataFrame, chart) -> dict:
+        validate_chart(chart, {str(c): column_kind(df[c]) for c in df})
         df = cls._apply_filters(df, chart.filters_json or {})
 
         if chart.chart_type == "table":
-            preview = df.head(100).where(pd.notna(df), None)
+            preview = df.head(100).astype(object).where(pd.notna(df.head(100)), None)
             return {"labels": [], "values": [], "rows": preview.to_dict(orient="records")}
 
         if chart.chart_type == "histogram":
             if not chart.x_column or chart.x_column not in df.columns:
                 raise ValueError("Invalid X column.")
+            if df[chart.x_column].dropna().empty:
+                return {"labels": [], "values": [], "rows": []}
             counts, _bins = pd.cut(df[chart.x_column].dropna(), bins=10, retbins=True)
             grouped = counts.value_counts().sort_index()
             return {

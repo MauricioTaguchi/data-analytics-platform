@@ -436,3 +436,39 @@ input::placeholder { color: var(--muted); opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Contract editors share the workspace surfaces and remain usable on narrow screens. */
+.operation-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.operation-fields label, .engine-field { display: flex; flex-direction: column; gap: 7px; font-size: 12px; }
+.engine-field { margin-bottom: 18px; max-width: 310px; }
+.engine-field small, .operation-fields small { color: var(--muted); line-height: 1.5; }
+.parameter-row { flex-wrap: wrap; margin-bottom: 12px; }
+.parameter-row label { min-width: 110px; flex: 1; }
+.operation-fields textarea { width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--text); font: inherit; }
+.operation-fields pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.column-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 18px 0; }
+.column-checklist label, .operation-fields .checkbox-label { flex-direction: row; align-items: center; overflow-wrap: anywhere; }
+.column-checklist input, .operation-fields .checkbox-label input { width: auto; }
+.snapshot-content { padding: 0 20px 20px; }
+.snapshot-list { list-style: none; padding: 0; margin: 0; }
+.snapshot-list li { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.snapshot-list li > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.snapshot-list p, .snapshot-list small { font-size: 11px; color: var(--muted); line-height: 1.6; }
+.snapshot-list button { margin-top: 10px; }
+.snapshot-list code, .quality-evidence code { overflow-wrap: anywhere; font-size: 10px; }
+.snapshot-list summary, .quality-evidence summary { cursor: pointer; font-size: 11px; margin: 8px 0; }
+.quality-contracts { margin-top: 20px; }
+.quality-contract-content { padding: 0 22px 22px; }
+.quality-rule { margin: 14px 0; padding: 16px; border: 1px solid var(--border); border-radius: 9px; }
+.quality-rule .field-row { flex-wrap: wrap; align-items: end; }
+.quality-rule .field-row label { min-width: 130px; flex: 1; }
+.quality-rule .checkbox-label { margin-top: 10px; }
+.quality-contract-content > .button-row { flex-wrap: wrap; }
+.quality-evidence { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+.quality-evidence h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.quality-evidence p { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.quality-evidence ul { padding: 0; list-style: none; }
+.quality-evidence li { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.quality-evidence li > span { display: block; font-size: 11px; margin-top: 6px; }
+.form-error { color: var(--danger); font-size: 12px; line-height: 1.6; }
+@media (max-width: 600px) { .quality-contract-content { padding: 0 14px 14px; } .quality-rule { padding: 12px; } .parameter-row { display: flex; } }

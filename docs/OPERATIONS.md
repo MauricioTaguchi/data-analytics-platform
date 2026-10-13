@@ -1,10 +1,10 @@
 # Operations and observability
 
-This runbook describes the signals the repository exposes and the checks an operator should perform. Platform-specific dashboards, retention, paging, backups, and service objectives must be added by each deployment.
+This runbook describes implemented telemetry and deployment checks. Operators must configure metric collection, alert delivery, backup destinations, and service objectives for their deployment.
 
 ## Runtime topology
 
-The local Compose stack runs separate API, worker, scheduler, PostgreSQL, Redis, and frontend containers. The scheduler runs `python -m app.scheduler` directly and can start once PostgreSQL and migrations are ready, without waiting for Redis. The included Render blueprint intentionally uses a smaller single-instance topology: the API, Celery worker, and recovery scheduler processes share one service and one persistent disk.
+The local Compose stack runs separate API, bulk worker, interactive worker, scheduler, PostgreSQL, Redis, and frontend containers. Imports, profiling, transformations, and quality checks use the bulk queue; previews and reports use the interactive queue. Both worker groups access the same local volumes. The scheduler runs `python -m app.scheduler` directly and can start once PostgreSQL and migrations are ready, without waiting for Redis. The Render blueprint uses one worker consuming both queues, with API and scheduler sharing its persistent disk; this smaller topology does not isolate interactive capacity. Drain old queues before changing worker routing.
 
 Do not add independent API or worker replicas while `LocalStorage` is active. The local disk is not shared across service instances. Use an S3-compatible storage implementation before horizontal scaling.
 
@@ -18,7 +18,7 @@ Do not add independent API or worker replicas while `LocalStorage` is active. Th
 
 Production readiness requires Redis. Development and test may report the bounded in-process cache fallback.
 
-`/health/ready` does not currently prove that a Celery worker is consuming jobs or that versioned storage is writable. Monitor worker heartbeats, queue age, and disk health separately.
+`/health/ready` does not prove that a Celery worker is completing jobs or that versioned storage is writable. The protected processing endpoint and Prometheus metrics report fresh worker/scheduler heartbeats, durable queue/outbox age, retries, job durations, storage directory presence, and free disk space separately. Fresh heartbeats do not prove useful work; alert on processing delay as well.
 
 The scheduler has an independent process check:
 
@@ -33,11 +33,24 @@ Job reconciliation and outbox dispatch run every 10 seconds after the preceding 
 
 ## Logs and correlation
 
-The API emits a JSON `http_request` event with request ID, method, path, status, and duration. It also returns `X-Request-ID`. Clients and reverse proxies should preserve that header so an application error can be correlated across systems.
+The API emits a JSON `http_request` event with request ID, method, path, status, and duration, and returns `X-Request-ID`. Valid IDs contain 1–100 letters, digits, dots, underscores, colons, or hyphens; invalid values are replaced. The ID is persisted on the job and outbox payload, carried in Celery headers, emitted by worker start/finish logs, and copied into new audit receipts. Job responses expose `correlation_id`; archived receipts preserve it after operational job retention. This is structured correlation, not a distributed tracing collector.
 
 Celery emits worker logs, and the recovery scheduler emits activity failures and watchdog errors through Python logging. Container runtimes capture these streams. The included single-container Render entrypoint exits when any required API, worker, or scheduler process dies, allowing the platform to restart the whole unit. A deployment should centralize application logs, redact secrets and uploaded content, apply retention, and attach service/revision/environment fields at ingestion.
 
-The current repository does not export metrics or traces. At minimum, production operators should add alerts for:
+## Protected metrics and example alerts
+
+Set a separate random `OPERATIONS_METRICS_TOKEN` through the deployment's secret store. An empty value disables the endpoints with `404`; invalid operator credentials return `401`. Application user tokens cannot authorize these endpoints. Keep them on private network paths, and use TLS if traffic crosses a trusted network boundary.
+
+- `GET /api/v1/operations/metrics` exports Prometheus text metrics.
+- `GET /api/v1/operations/processing` returns the same operational observations as JSON.
+- Both require `Authorization: Bearer <operator-token>`.
+- Metrics contain bounded kind/status labels, never account IDs, task IDs, file names, or dataset values.
+- Retained-job and retry counts are gauges and decrease during retention. Durations summarize the last 1,000 retained completions, not lifetime histograms.
+- Heartbeats expire after `OPERATIONS_HEARTBEAT_TTL_SECONDS` (default 30). Telemetry Redis calls have independent short timeouts and failures never stop recovery or data execution.
+
+[Prometheus configuration](../ops/prometheus.example.yml) reads the operator token from a mounted secret file. [Example alerts](../ops/prometheus-alerts.yml) cover queue/outbox lag, missing workers/schedulers, unavailable telemetry, and low storage. Mount the alert file at `/etc/prometheus/dataflow-alerts.yml`; configure Alertmanager and delivery separately. Example thresholds are starting points and are not claimed SLOs. Scrape each API replica to observe its local disk; the deployment must also collect container memory/CPU, HTTP latency/error rates, and database metrics.
+
+At minimum, production operators should monitor:
 
 - readiness failures and restart loops;
 - elevated HTTP `5xx`, authentication `429`, and request latency;
@@ -86,6 +99,8 @@ Do not downgrade a database blindly. Determine whether the migration is backward
 
 ## Backup and recovery ownership
 
-The repository does not create platform backups. Before accepting important data, the deployment owner must define database and file-storage backup schedules, retention, encryption, access control, restore procedure, and restore-test cadence. Record the measured recovery point and recovery time after a successful drill.
+The repository includes a maintenance-window backup CLI, archive verification, isolated restore, an optional version-pinned S3 backup destination, and a real PostgreSQL restore drill in CI. See [Disaster recovery](DISASTER_RECOVERY.md) for commands, consistency requirements, and safe promotion of restored paths. These tools do not schedule or fund a production backup service. Configure destination, schedule, encryption, retention, and access control before accepting important data. Record measured production recovery objectives; the small CI fixture does not establish production RPO/RTO.
+
+Snapshot expiry is separate from backups and audit retention. It is disabled by default. See [Snapshot integrity and retention](SNAPSHOT_INTEGRITY.md) before setting `SNAPSHOT_RETENTION_DAYS`.
 
 See [Deployment](DEPLOYMENT.md), [Release process](RELEASES.md), and [Known limitations](LIMITATIONS.md).

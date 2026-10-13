@@ -25,7 +25,7 @@ export function previewPage(rows: DataRow[], requestedPage: number) {
 
 function formatValue(value: DataRow[string] | undefined) {
   if (value === null || value === undefined) return <span className="null-value">null</span>;
-  if (typeof value === "number") return String(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
   return value;
 }
 

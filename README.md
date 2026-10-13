@@ -63,12 +63,12 @@ The one-shot migration service must finish successfully before the API, worker, 
 
 ## The workspace
 
-The console groups data preparation, delivery, and operations in one responsive navigation. Dark and light themes share the same controls, and the selected theme persists in the browser. Tables paginate the loaded preview; quality indicators explicitly describe those preview rows rather than claiming full-dataset validation.
+The console groups data preparation, delivery, and operations in one responsive navigation. Dark and light themes share the same controls, and the selected theme persists in the browser. Tables paginate the loaded preview; preview indicators describe only those rows. Separate versioned quality contracts evaluate the complete admitted snapshot asynchronously and retain their evidence.
 
 | Workspace | What you can do |
 | --- | --- |
 | **Overview** | Review the active dataset, quality indicators, and recent work. |
-| **Datasets** | Upload CSV, Excel, JSON, or Parquet; inspect schema and paginated records. |
+| **Datasets** | Upload CSV, Excel, JSON, or Parquet; inspect records, snapshot history, and quality contracts. |
 | **Transformations** | Preview an operation, apply it against an expected version, inspect lineage, and undo completed changes. |
 | **Dashboards** | Build persisted charts and interactive dashboards from your datasets. |
 | **Reports** | Generate PDF data-quality reports and download completed outputs. |
@@ -80,10 +80,10 @@ The console groups data preparation, delivery, and operations in one responsive 
 2. **Understand:** inspect types, missing values, duplicates, correlations, and outliers before changing the data.
 3. **Preview:** materialize a transformation through the selected engine without publishing a new dataset revision.
 4. **Apply:** submit an expected revision and idempotency key; follow the asynchronous job through completion.
-5. **Verify or undo:** inspect committed events and restore previous content while the revision number keeps increasing.
+5. **Verify or undo:** run a quality contract, inspect committed events, and restore checksum-verified content while the revision number keeps increasing.
 6. **Share:** build a dashboard, export the current dataset, or generate a PDF quality report.
 
-New transformation outputs use Parquet to preserve column types. Original uploads and historical snapshots remain available for undo. Parquet pagination reads only requested columns and relevant row groups; profiling and chart aggregation still have bounded, eager processing paths.
+New transformation outputs use Parquet to preserve column types. Original uploads retain their bytes. New snapshots capture their digest at creation; undo checks it before restoration. History retention is disabled by default and preserves active, recent, pinned, and in-flight snapshots when enabled. Parquet previews project columns and row groups; eligible charts aggregate directly through DuckDB with strict filters and a bounded revision-aware cache.
 
 ## Engineering with evidence
 
@@ -95,16 +95,20 @@ The implementation focuses on failure modes that appear when a data workflow cro
 | A response is lost after undo commits | Transactional audit events retain immutable receipts so the same request can be retried. | [Audit receipt tests](backend/tests/test_dataset_audit_receipts.py) |
 | The broker is unavailable or a worker disappears | A transactional outbox, leased attempts, bounded backoff, and a separate scheduler recover committed work. | [Recovery tests](backend/tests/test_outbox_recovery.py) |
 | File publication and database commit fail separately | Immutable attempt paths, durable reservations, and repeatable collection reconcile unreferenced artifacts. | [Publication tests](backend/tests/test_transformation_publication.py), [artifact tests](backend/tests/test_artifact_lifecycle.py) |
-| Engines disagree about operations or types | Typed parameter contracts, capability preflight, checked casts, and output verification reject unsupported semantics. | [Operation catalog](backend/app/services/operations.py), [engine tests](backend/tests/test_transformation_engines.py) |
+| Engines disagree about operations or types | Versioned handlers are pinned at admission; typed contracts, preflight, checked casts and output verification reject unsupported semantics. | [Operation catalog](backend/app/services/operations.py), [engine tests](backend/tests/test_transformation_engines.py) |
+| Historical bytes are corrupted or storage fills up | Origin-time checksums, verified undo, explicit expiration, pinning, and durable collection protect the current head. | [Snapshot integrity tests](backend/tests/test_snapshot_integrity.py), [PostgreSQL guards](backend/integration/test_snapshot_integrity.py) |
+| A chart silently ignores a broken filter or loads every column | Strict typed filters and bounded DuckDB Parquet queries reject invalid requests; cache entries include dataset revision and tenant. | [Dashboard implementation](backend/app/services/dashboard_service.py) |
+| Quality checks drift from the dataset being evaluated | Immutable contracts, pinned snapshot identity, leased jobs, and retained results distinguish current from stale evidence. | [Quality contracts](docs/DATA_QUALITY.md), [quality tests](backend/tests/test_quality_contracts.py) |
 | Retries conceal real process failures | Integration tests terminate processes, interrupt broker access, and deliver duplicate messages using real services. | [Process integration tests](backend/integration/test_process_recovery.py) |
 
 ### Capacity, isolation, and security
 
 - **Bounded admission:** declared and streamed upload limits, per-process spool concurrency, preflight job/rate checks, and chunked storage validation. Non-upload JSON/form requests have a separate 1 MiB pre-parser body limit, including requests without `Content-Length`.
-- **Bounded execution:** per-account storage quotas, expansion checks, guarded transformation outputs, PostgreSQL-backed job ownership and concurrency limits, and worker container resource limits.
+- **Bounded execution:** per-account storage quotas, expansion checks, guarded transformation outputs, PostgreSQL-backed job ownership and concurrency limits, supervised execution deadlines/RSS checks, chart concurrency limits, and worker container resource limits.
 - **Account boundaries:** tenant isolation on API access, rotating refresh tokens with single-use server sessions, logout revocation, and consistent problem responses.
 - **Shared coordination:** Redis-backed cache, broker, and multi-instance authentication/upload rate limits. Bounded TTL fallback is restricted to local/test environments; Redis is required in production.
-- **Lifecycle management:** Alembic-only schema changes, expired-session cleanup, orphan-file reconciliation, and bounded job-history retention.
+- **Operational evidence:** protected processing/Prometheus metrics, durable request-to-worker correlation, verified backup/restore tooling, and reproducible benchmarks with stated measurement limits.
+- **Lifecycle management:** Alembic-only schema changes, expired-session cleanup, orphan-file reconciliation, bounded job-history retention, and opt-in snapshot expiration with pinning.
 
 ## Architecture
 
@@ -121,9 +125,9 @@ flowchart TD
     W --> F
 ```
 
-Transformation rules are separated from publication. Adapters consume a snapshot, transformation plan, and resource policy; the service layer owns leases, revisions, audit events, and transactions. Pandas is the default for bounded workloads. Optional Polars and DuckDB adapters execute supported Parquet projections in supervised subprocesses.
+Transformation rules are separated from publication. Adapters consume a snapshot, transformation plan, and resource policy; the service layer owns leases, revisions, audit events, and transactions. Pandas is the default for bounded workloads. Import inspection, profiling, preview, quality evaluation, and transformations run in supervised subprocesses. Versioned handlers bind queued work to its admitted semantics. Polars and DuckDB support selected Parquet projections; the live interface discovers capabilities from the operation catalog. Compose separates interactive preview/report workers from bulk dataset processing.
 
-The current storage implementation uses local paths, rename, and fsync. Moving to object storage requires an artifact-reference and local-materialization boundary as well as an adapter. See [Architecture](docs/ARCHITECTURE.md), [Architecture decisions](docs/DECISIONS.md), and [Adding transformations and engines](CONTRIBUTING.md#adding-transformations-and-engines).
+The current storage implementation uses local paths, rename, and fsync. Verified backup archives can use an optional versioned S3 destination. Runtime datasets still use local paths; moving live processing to object storage requires an artifact-reference and local-materialization boundary. See [Architecture](docs/ARCHITECTURE.md), [Architecture decisions](docs/DECISIONS.md), and [Adding transformations and engines](CONTRIBUTING.md#adding-transformations-and-engines).
 
 ## Test and verify
 
@@ -137,6 +141,7 @@ python -m pytest --cov=app --cov-fail-under=70
 cd ../frontend
 corepack enable
 pnpm install --frozen-lockfile
+pnpm exec eslint src --ext .ts,.tsx --max-warnings 0
 pnpm typecheck
 pnpm test
 pnpm build
@@ -148,11 +153,11 @@ pnpm test:e2e
 | --- | --- |
 | Backend tests | Operation contracts, data quality, immutable source data, publication, idempotency, quotas, and API behavior. |
 | PostgreSQL tests | Locking and concurrency behavior against a real database in CI. |
-| Process integration | API restart, publisher network interruption, duplicate delivery, and worker death after file rename, with eager mode disabled. |
+| Process integration | API restart, broker interruption, duplicate delivery, worker death after rename, corrupt snapshots, and direct-SQL audit guards after real migrations. |
 | Frontend and browser tests | Request recovery, preview pagination and missing-value accuracy, keyboard focus, persistent themes, and desktop/mobile workflows, including a live upload-to-undo journey. |
 | Repository checks | Migrations, lint, type checks, backend and targeted frontend coverage gates, dependency audits/review, and CodeQL. |
 
-The fast backend suite uses eager task execution. The process suite requires disposable PostgreSQL and Redis services and must be run explicitly; see [Real process integration](CONTRIBUTING.md#real-process-integration). A skipped process suite does not verify recovery. Coverage thresholds are quality gates, not capacity benchmarks.
+The fast backend suite uses eager task execution. The process suite requires disposable PostgreSQL and Redis services and must be run explicitly; see [Real process integration](CONTRIBUTING.md#real-process-integration). A skipped process suite does not verify recovery. Coverage thresholds are quality gates, not capacity benchmarks. Run the reproducible [benchmark procedure](docs/BENCHMARKS.md) and the isolated [backup/restore drill](docs/DISASTER_RECOVERY.md) before making capacity or recovery claims. CI badges reflect the branch actually checked; validation of a new change must be reported from its own workflow run.
 
 ## Core API workflow
 
@@ -170,6 +175,11 @@ All dataset and job operations below enforce ownership. Interactive request and 
 | Restore previous content | `POST /api/v1/datasets/{dataset_id}/transformations/undo` |
 | Read committed transformation and undo events | `GET /api/v1/datasets/{dataset_id}/events` |
 | Discover typed operations and engine capabilities | `GET /api/v1/datasets/operations` |
+| Inspect snapshot retention and integrity metadata | `GET /api/v1/datasets/{dataset_id}/snapshots` |
+| Pin or unpin available history | `PATCH /api/v1/datasets/{dataset_id}/snapshots/{snapshot_id}` |
+| Create a versioned quality contract | `POST /api/v1/datasets/{dataset_id}/quality/contracts` |
+| Enqueue a snapshot-bound quality evaluation | `POST /api/v1/datasets/{dataset_id}/quality/evaluations` |
+| Read retained quality evidence | `GET /api/v1/datasets/{dataset_id}/quality/evaluations` |
 | Create a dashboard | `POST /api/v1/dashboards` |
 | Add a chart | `POST /api/v1/dashboards/{id}/charts` |
 | Enqueue a PDF report | `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` |
@@ -177,13 +187,15 @@ All dataset and job operations below enforce ownership. Interactive request and 
 
 Undo accepts a body such as `{"expected_version": 3}`. Supplying `Idempotency-Key` makes a retry return the original receipt; restoring older content still advances the dataset revision. Authentication supports registration, login, automatic refresh-token rotation, and logout/revocation. See [API examples](docs/API_EXAMPLES.md) and [Audit events and receipts](docs/AUDIT_RECEIPTS.md).
 
+Operational endpoints `/api/v1/operations/processing` and `/api/v1/operations/metrics` use a separate configured metrics bearer token and remain disabled when it is absent. They expose processing observations, not user-facing dataset access.
+
 ## Deliberate trade-offs
 
 - Local versioned files keep development reproducible. Horizontally scaled production needs an appropriate shared-storage design; encrypted object storage is a planned direction.
 - Upload receive concurrency is process-local and scales with the number of API workers. Application body guards complement reverse-proxy and ASGI-server size, timeout, and connection limits.
-- Pandas operations remain bounded by dataset limits and available memory. Native subprocess memory/spill watchdogs complement container limits; they do not make every operation distributed or streaming.
-- Audit events and receipts support recovery and traceability. ORM immutability checks do not protect against privileged direct database writes, and undo does not perform full checksum verification of historical snapshots.
-- Chart aggregation is synchronous and bounded by the dataset limit. Large analytical queries need a separate execution strategy.
+- Pandas remains bounded, single-node processing. Supervised subprocess RSS/spill checks are sampled; container limits provide aggregate enforcement. Chart fallback paths and PDF generation still require conservative API/worker sizing.
+- New snapshots have origin-time checksums; legacy files remain explicitly unverified. PostgreSQL triggers and separate runtime-role privileges restrict audit mutation, but database owners and filesystem administrators can bypass these controls.
+- Chart queries remain synchronous. DuckDB buffer/deadline limits and per-process concurrency do not provide cluster-wide admission or unlimited analytical scale; unsupported type/histogram paths use projected Pandas fallback.
 - Demo changes are non-persistent. The live backend is required to evaluate durable publication, job recovery, and account isolation.
 
 The full scope of these boundaries is recorded in [Known limitations](docs/LIMITATIONS.md).
@@ -195,16 +207,17 @@ The full scope of these boundaries is recorded in [Known limitations](docs/LIMIT
 | Understand the design | [Architecture](docs/ARCHITECTURE.md) · [Decisions](docs/DECISIONS.md) |
 | Integrate a client | [API examples](docs/API_EXAMPLES.md) · [Audit and undo receipts](docs/AUDIT_RECEIPTS.md) |
 | Deploy and operate | [Deployment](docs/DEPLOYMENT.md) · [Operations and observability](docs/OPERATIONS.md) |
-| Recover or upgrade | [Processing, recovery, and upgrade procedure](docs/PROCESSING_RECOVERY.md) · [Release process](docs/RELEASES.md) |
+| Recover or upgrade | [Upgrade procedure](docs/PROCESSING_RECOVERY.md) · [Backup and restore](docs/DISASTER_RECOVERY.md) · [Release process](docs/RELEASES.md) |
+| Evaluate data and capacity | [Quality contracts](docs/DATA_QUALITY.md) · [Snapshot integrity](docs/SNAPSHOT_INTEGRITY.md) · [Benchmarks](docs/BENCHMARKS.md) |
 | Evaluate boundaries | [Known limitations](docs/LIMITATIONS.md) · [Security model](docs/SECURITY.md) |
 | Extend the platform | [Contributing](CONTRIBUTING.md) · [Transformation and engine contracts](CONTRIBUTING.md#adding-transformations-and-engines) |
 
 ## Next engineering milestones
 
-- S3/MinIO storage with artifact references, encrypted objects, and signed downloads.
-- OpenTelemetry traces and centralized error monitoring.
-- Column-level validation contracts and scheduled quality rules.
-- Measured memory/latency benchmarks, incremental quota accounting, and explicit snapshot-retention windows.
+- Shared runtime S3/MinIO storage with artifact references, encrypted objects, and signed downloads; the current S3 adapter stores backup archives only.
+- Full OpenTelemetry traces and centralized error monitoring beyond the implemented correlation IDs and protected processing metrics.
+- Scheduled quality evaluation and optional enforcement gates beyond explicit advisory contract runs.
+- Broader workload benchmarks, deployment-specific restore objectives, and incremental quota accounting.
 - Visual regression snapshots for dashboard states.
 - Distributed processing beyond single-node memory.
 

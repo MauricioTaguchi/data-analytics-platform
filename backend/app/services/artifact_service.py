@@ -4,12 +4,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, false, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.dataset import Dataset
+from app.models.dataset_snapshot import DatasetSnapshot
 from app.models.job import JobRecord
 from app.models.report import Report
 from app.models.storage_artifact import StorageArtifact
@@ -211,14 +212,25 @@ class ArtifactService:
             .first()
         ):
             return True
+        manifest = db.query(DatasetSnapshot).filter(DatasetSnapshot.stored_path.in_(spellings)).first()
+        if manifest is not None and manifest.availability == "AVAILABLE":
+            retained_dataset = db.get(Dataset, manifest.dataset_id)
+            if retained_dataset and retained_dataset.deleted_at is None and retained_dataset.status not in {"failed", "cancelled"}:
+                return True
+        # Expiration keeps immutable transformation/audit metadata, while
+        # removing that path's historical storage reference. A pending writer
+        # remains protected independently and can never revive expired bytes.
+        historical_reference = true() if manifest is None or manifest.availability != "EXPIRED" else false()
         if (
             db.query(Transformation.id)
             .filter(
                 or_(
-                    Transformation.input_path.in_(spellings),
+                    and_(Transformation.input_path.in_(spellings),
+                         or_(historical_reference, Transformation.status.in_({"pending", "processing"}))),
                     and_(
                         Transformation.output_path.in_(spellings),
                         Transformation.status.in_({"completed", "undone"}),
+                        historical_reference,
                     ),
                 )
             )

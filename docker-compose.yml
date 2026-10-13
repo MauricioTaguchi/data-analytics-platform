@@ -14,6 +14,8 @@ services:
     container_name: analytics-api
     init: true
     restart: unless-stopped
+    mem_limit: ${DATAFLOW_API_MEMORY_LIMIT:-2g}
+    cpus: ${DATAFLOW_API_CPUS:-2.0}
     env_file: [./backend/.env]
     ports: ["8000:8000"]
     depends_on:
@@ -48,7 +50,32 @@ services:
     volumes:
       - analytics_uploads:/app/data/uploads
       - analytics_reports:/app/data/reports
-    command: celery -A app.worker.celery_app worker --loglevel=info
+    command: celery -A app.worker.celery_app worker --loglevel=info --queues bulk
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 60s
+
+  interactive-worker:
+    build: ./backend
+    container_name: analytics-interactive-worker
+    init: true
+    restart: unless-stopped
+    mem_limit: ${DATAFLOW_INTERACTIVE_MEMORY_LIMIT:-1g}
+    cpus: ${DATAFLOW_INTERACTIVE_CPUS:-1.0}
+    pids_limit: 128
+    env_file: [./backend/.env]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    volumes:
+      - analytics_uploads:/app/data/uploads
+      - analytics_reports:/app/data/reports
+    command: celery -A app.worker.celery_app worker --loglevel=info --queues interactive --concurrency 1
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout=5 | grep -q pong"]
       interval: 30s

@@ -35,6 +35,7 @@ function resultIdentifier(result: Record<string, unknown> | null | undefined, ke
 export function useDatasetUpload() {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [rows, setRows] = useState<DataRow[]>(SAMPLE_ROWS);
+  const [schemaColumns, setSchemaColumns] = useState<string[] | null>(null);
   const [datasetName, setDatasetName] = useState("sales_sample.csv");
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -42,7 +43,7 @@ export function useDatasetUpload() {
   const activeTaskId = useRef<string | null>(null);
   const activeTaskLabel = useRef("Background job");
   const cancellationPending = useRef(false);
-  const columns = useMemo(() => Object.keys(rows[0] || {}), [rows]);
+  const columns = useMemo(() => rows.length ? Object.keys(rows[0]) : schemaColumns || [], [rows, schemaColumns]);
 
   useEffect(() => () => {
     uploadController.current?.abort();
@@ -54,6 +55,7 @@ export function useDatasetUpload() {
     uploadController.current = null;
     activeTaskId.current = null;
     setDataset(null);
+    setSchemaColumns(null);
     setRows(SAMPLE_ROWS.map((row) => ({ ...row })));
     setDatasetName("sales_sample.csv");
     setUploadPhase("idle");
@@ -64,7 +66,7 @@ export function useDatasetUpload() {
     if (!projectId) {
       if (!file.name.toLowerCase().endsWith(".csv")) throw new Error("Local mode accepts CSV files. Connect the API for Excel, JSON, or Parquet.");
       const parsed = parseCsvText(await file.text());
-      setDataset(null); setRows(parsed); setDatasetName(file.name);
+      setDataset(null); setSchemaColumns(null); setRows(parsed); setDatasetName(file.name);
       return { mode: "local" as const };
     }
     uploadController.current?.abort();
@@ -102,7 +104,7 @@ export function useDatasetUpload() {
       activeTaskId.current = null;
       let current = await fetchDataset(importDatasetId, controller.signal);
       const preview = await fetchDatasetPreview(current.id, controller.signal);
-      setDataset(current); setRows(preview.rows); setDatasetName(current.original_filename);
+      setDataset(current); setSchemaColumns(preview.columns); setRows(preview.rows); setDatasetName(current.original_filename);
       const profileTaskId = crypto.randomUUID();
       activeTaskId.current = profileTaskId;
       activeTaskLabel.current = "Dataset profiling";
@@ -134,7 +136,7 @@ export function useDatasetUpload() {
   const refresh = useCallback(async () => {
     if (!datasetId) return;
     const [current, preview] = await Promise.all([fetchDataset(datasetId), fetchDatasetPreview(datasetId)]);
-    setDataset(current); setRows(preview.rows);
+    setDataset(current); setSchemaColumns(preview.columns); setRows(preview.rows);
   }, [datasetId]);
 
   const cancelUpload = useCallback(async (cancelTrackedJob?: CancelTrackedJob) => {

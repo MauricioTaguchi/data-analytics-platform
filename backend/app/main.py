@@ -1,7 +1,6 @@
 import json
 import logging
 from time import perf_counter
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +11,7 @@ from app.api.v1.router import api_router
 from app.core.cache import CacheService
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
+from app.core.telemetry import bind_correlation, normalize_correlation, reset_correlation
 from app.core.upload_guard import (
     RequestBodyLimitMiddleware,
     UploadAdmissionMiddleware,
@@ -49,7 +49,7 @@ def _client_address(request: Request) -> str:
 
 @app.middleware("http")
 async def security_and_rate_limit(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", "")[:100] or str(uuid4())
+    request_id = normalize_correlation(request.headers.get("X-Request-ID"))
     started_at = perf_counter()
 
     if request.url.path.endswith(("/auth/login", "/auth/register")):
@@ -69,7 +69,11 @@ async def security_and_rate_limit(request: Request, call_next):
                 content={"detail": "Too many authentication attempts. Try again shortly."},
             )
 
-    response = await call_next(request)
+    token = bind_correlation(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_correlation(token)
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"

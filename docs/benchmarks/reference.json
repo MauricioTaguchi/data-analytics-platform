@@ -1,0 +1,401 @@
+{
+  "datasets": [
+    {
+      "columns": 34,
+      "distribution": "80% Central group before null injection; 1/31 null revenue; 1/97 null region; 1/11 zero revenue",
+      "exact_query_parity": true,
+      "parquet_bytes": 2530292,
+      "processing": [
+        {
+          "columns": 2,
+          "elapsed_ms": 833.675,
+          "engine": "pandas",
+          "exact_output_parity": true,
+          "execution_child_peak_rss_mib": 182.727,
+          "operation": "drop_columns",
+          "output_bytes": 22887,
+          "rows": 10000,
+          "supervisor_peak_rss_mib": 235.375
+        },
+        {
+          "columns": 2,
+          "elapsed_ms": 332.203,
+          "engine": "duckdb",
+          "exact_output_parity": true,
+          "execution_child_peak_rss_mib": 133.32,
+          "operation": "drop_columns",
+          "output_bytes": 19883,
+          "rows": 10000,
+          "supervisor_peak_rss_mib": 245.566
+        }
+      ],
+      "queried_columns": 2,
+      "queries": [
+        {
+          "baseline_rss_mib": 194.992,
+          "cache_lookup": {
+            "max_ms": 0.065,
+            "median_ms": 0.003,
+            "samples_ms": [
+              0.065,
+              0.06,
+              0.063,
+              0.005,
+              0.004,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.002
+            ]
+          },
+          "concurrent_pairs": {
+            "max_ms": 33.738,
+            "median_ms": 29.041,
+            "samples_ms": [
+              28.123,
+              29.041,
+              33.738
+            ]
+          },
+          "engine": "pandas_full_read",
+          "first_query_ms": 26.827,
+          "peak_rss_growth_mib": 48.383,
+          "process_peak_rss_mib": 243.375,
+          "result": {
+            "labels": [
+              "Central",
+              "East",
+              "North",
+              "South",
+              "West",
+              "nan"
+            ],
+            "rows": [],
+            "values": [
+              3183474.0,
+              197216.0,
+              210535.0,
+              199639.0,
+              207740.0,
+              40383.0
+            ]
+          },
+          "rss_sampling_interval_ms": 2,
+          "warm_queries": {
+            "max_ms": 12.533,
+            "median_ms": 11.896,
+            "samples_ms": [
+              12.533,
+              11.896,
+              11.647,
+              11.484,
+              12.218
+            ]
+          }
+        },
+        {
+          "baseline_rss_mib": 196.145,
+          "cache_lookup": {
+            "max_ms": 0.16,
+            "median_ms": 0.003,
+            "samples_ms": [
+              0.16,
+              0.007,
+              0.004,
+              0.003,
+              0.003,
+              0.003,
+              0.002,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.002,
+              0.003,
+              0.002
+            ]
+          },
+          "concurrent_pairs": {
+            "max_ms": 17.824,
+            "median_ms": 16.549,
+            "samples_ms": [
+              17.824,
+              16.549,
+              14.602
+            ]
+          },
+          "engine": "duckdb_projected",
+          "first_query_ms": 20.423,
+          "peak_rss_growth_mib": 26.504,
+          "process_peak_rss_mib": 222.648,
+          "result": {
+            "labels": [
+              "Central",
+              "East",
+              "North",
+              "South",
+              "West",
+              "nan"
+            ],
+            "rows": [],
+            "values": [
+              3183474.0,
+              197216.0,
+              210535.0,
+              199639.0,
+              207740.0,
+              40383.0
+            ]
+          },
+          "rss_sampling_interval_ms": 2,
+          "warm_queries": {
+            "max_ms": 15.139,
+            "median_ms": 13.848,
+            "samples_ms": [
+              13.965,
+              13.848,
+              13.2,
+              12.936,
+              15.139
+            ]
+          }
+        }
+      ],
+      "rows": 10000,
+      "seed": 20271013
+    },
+    {
+      "columns": 34,
+      "distribution": "80% Central group before null injection; 1/31 null revenue; 1/97 null region; 1/11 zero revenue",
+      "exact_query_parity": true,
+      "parquet_bytes": 25188962,
+      "processing": [
+        {
+          "columns": 2,
+          "elapsed_ms": 1126.034,
+          "engine": "pandas",
+          "exact_output_parity": true,
+          "execution_child_peak_rss_mib": 242.266,
+          "operation": "drop_columns",
+          "output_bytes": 172087,
+          "rows": 100000,
+          "supervisor_peak_rss_mib": 310.242
+        },
+        {
+          "columns": 2,
+          "elapsed_ms": 386.273,
+          "engine": "duckdb",
+          "exact_output_parity": true,
+          "execution_child_peak_rss_mib": 140.133,
+          "operation": "drop_columns",
+          "output_bytes": 153119,
+          "rows": 100000,
+          "supervisor_peak_rss_mib": 310.242
+        }
+      ],
+      "queried_columns": 2,
+      "queries": [
+        {
+          "baseline_rss_mib": 196.5,
+          "cache_lookup": {
+            "max_ms": 0.113,
+            "median_ms": 0.003,
+            "samples_ms": [
+              0.042,
+              0.01,
+              0.113,
+              0.004,
+              0.004,
+              0.004,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003,
+              0.003
+            ]
+          },
+          "concurrent_pairs": {
+            "max_ms": 192.644,
+            "median_ms": 166.66,
+            "samples_ms": [
+              166.66,
+              160.141,
+              192.644
+            ]
+          },
+          "engine": "pandas_full_read",
+          "first_query_ms": 117.151,
+          "peak_rss_growth_mib": 309.453,
+          "process_peak_rss_mib": 505.953,
+          "result": {
+            "labels": [
+              "Central",
+              "East",
+              "North",
+              "South",
+              "West",
+              "nan"
+            ],
+            "rows": [],
+            "values": [
+              31654281.0,
+              1996363.0,
+              1995709.0,
+              1982163.0,
+              1981749.0,
+              405417.0
+            ]
+          },
+          "rss_sampling_interval_ms": 2,
+          "warm_queries": {
+            "max_ms": 116.34,
+            "median_ms": 99.928,
+            "samples_ms": [
+              116.34,
+              99.928,
+              80.909,
+              81.451,
+              112.086
+            ]
+          }
+        },
+        {
+          "baseline_rss_mib": 194.852,
+          "cache_lookup": {
+            "max_ms": 0.079,
+            "median_ms": 0.004,
+            "samples_ms": [
+              0.079,
+              0.01,
+              0.006,
+              0.005,
+              0.004,
+              0.004,
+              0.004,
+              0.004,
+              0.004,
+              0.005,
+              0.004,
+              0.004,
+              0.004,
+              0.004,
+              0.005,
+              0.005,
+              0.004,
+              0.004,
+              0.004,
+              0.004
+            ]
+          },
+          "concurrent_pairs": {
+            "max_ms": 27.366,
+            "median_ms": 22.77,
+            "samples_ms": [
+              27.366,
+              22.77,
+              21.403
+            ]
+          },
+          "engine": "duckdb_projected",
+          "first_query_ms": 23.169,
+          "peak_rss_growth_mib": 28.672,
+          "process_peak_rss_mib": 223.523,
+          "result": {
+            "labels": [
+              "Central",
+              "East",
+              "North",
+              "South",
+              "West",
+              "nan"
+            ],
+            "rows": [],
+            "values": [
+              31654281.0,
+              1996363.0,
+              1995709.0,
+              1982163.0,
+              1981749.0,
+              405417.0
+            ]
+          },
+          "rss_sampling_interval_ms": 2,
+          "warm_queries": {
+            "max_ms": 28.408,
+            "median_ms": 25.896,
+            "samples_ms": [
+              20.335,
+              21.628,
+              26.981,
+              25.896,
+              28.408
+            ]
+          }
+        }
+      ],
+      "rows": 100000,
+      "seed": 20361013
+    }
+  ],
+  "edge_parity_checks": 3,
+  "machine": {
+    "architecture": "x86_64",
+    "cgroup_cpu_max": "800000 100000",
+    "cgroup_memory_max": "8589934592",
+    "cpu_affinity_count": 9,
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "dependencies": {
+      "duckdb": "1.5.5",
+      "numpy": "2.5.4",
+      "pandas": "2.2.3",
+      "pyarrow": "25.0.0"
+    },
+    "logical_cpus": 9,
+    "os": "Linux-6.18.44-x86_64-with-glibc2.39",
+    "python": "3.12.14"
+  },
+  "notes": [
+    "Synthetic single-machine measurements; no production throughput, RPO or RTO claim.",
+    "First query uses a fresh process/engine; OS filesystem cache is not flushed.",
+    "Query timings exclude API/authentication/database/network work and subprocess startup.",
+    "Warm queries rerun the query engine; cache lookup is measured separately.",
+    "Query RSS samples Linux /proc VmRSS every 2ms; brief peaks may be missed; baseline includes application imports.",
+    "Processing child RSS uses OS ru_maxrss; supervisor RSS includes inherited high-water memory and is reported separately.",
+    "Concurrency pairs measure the elapsed completion time of two queries on two threads.",
+    "Supervised processing includes child startup, validation, materialization and hashing."
+  ],
+  "query_memory_mb": 128,
+  "query_threads": 1,
+  "recorded_at": "2026-10-13T19:24:03.124431+00:00",
+  "source": {
+    "application_source_sha256": "32d75722119cbfdfe741d96d918ecb9f36fad2e5c0f48b8763b6a1b3d1e2927a",
+    "base_commit": "82b64733f5426d6b164a08d52bcf6d039fa91ca1",
+    "working_tree_modified": true
+  }
+}

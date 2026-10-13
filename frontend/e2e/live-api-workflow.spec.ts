@@ -56,7 +56,17 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(initialPreviewResponse.ok()).toBe(true);
   const initialPreview = await initialPreviewResponse.json();
 
+  await page.getByLabel("Contract name", { exact: true }).fill("Sales integrity rules");
+  await page.getByLabel("Rule column 1", { exact: true }).selectOption("customer");
+  await page.getByRole("button", { name: "Save contract version", exact: true }).click();
+  await expect(page.getByText(/Contract version 1 saved/)).toBeVisible();
+  await page.getByRole("button", { name: "Evaluate saved contract", exact: true }).click();
+  const evidence = page.getByRole("region", { name: "Quality evaluation evidence", exact: true });
+  await expect(evidence).toContainText("1 of 1 rules passed", { timeout: 30_000 });
+  await page.screenshot({ path: test.info().outputPath("live-quality-evidence.png"), fullPage: true });
+
   await openSection(page, "Transformations");
+  await expect(page.getByRole("button", { name: "Remove columns", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Rename column", exact: true }).click();
   await page.getByLabel(/^Column/).selectOption("customer");
   await page.getByLabel("Parameter", { exact: true }).fill("customer_name");
@@ -67,6 +77,12 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   const transformedPreview = await transformedResponse.json();
   expect(transformedPreview.columns).toContain("customer_name");
   expect(transformedPreview.columns).not.toContain("customer");
+
+  const snapshots = page.locator(".snapshot-card");
+  await expect(snapshots).toContainText("SHA-256 recorded");
+  await snapshots.locator("li").filter({ hasText: "Undo target" }).getByRole("button", { name: "Pin snapshot", exact: true }).click();
+  await expect(snapshots.getByRole("button", { name: "Unpin snapshot", exact: true })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("live-snapshot-history.png"), fullPage: true });
 
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export current version" }).click();
@@ -101,6 +117,8 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(restoredPreviewResponse.ok()).toBe(true);
   expect(await restoredPreviewResponse.json()).toEqual(initialPreview);
 
+  await openSection(page, "Datasets");
+  await expect(page.getByRole("region", { name: "Quality evaluation evidence", exact: true })).toContainText("Historical evidence");
   await openSection(page, "Dashboards");
   await page.getByRole("button", { name: "Build chart" }).click();
   await expect(page.getByRole("img", { name: "Generated data chart" })).toBeVisible();

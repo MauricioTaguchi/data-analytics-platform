@@ -5,15 +5,17 @@ engine implementation. The registry deliberately does not import a dataframe
 runtime: native schema checks inspect only Parquet metadata.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictStr, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictStr, ValidationError, field_validator
 
 from app.core.config import settings
 from app.services.engines.contracts import EngineCapabilityError, TransformationPlan
+from app.services import operation_handlers as handlers
 
 
 EngineName = Literal["pandas", "polars", "duckdb"]
@@ -89,18 +91,50 @@ class OperationDefinition:
     preserves_rows: bool
     preserves_order: bool
     preserves_types: bool
+    pandas_handler: Callable[[Any, dict], Any]
+    projection_handler: Callable[[list[str], dict], list[tuple[str, str]]] | None = None
 
 
-OPERATIONS = MappingProxyType({
-    definition.name: definition
-    for definition in (
-        OperationDefinition("drop_columns", "1.0.0", DropColumnsParameters, ("pandas", "polars", "duckdb"), True, True, True),
-        OperationDefinition("rename_columns", "1.0.0", RenameColumnsParameters, ("pandas", "polars", "duckdb"), True, True, True),
-        OperationDefinition("fill_nulls", "1.0.0", FillNullsParameters, ("pandas",), True, True, False),
-        OperationDefinition("drop_duplicates", "1.0.0", DropDuplicatesParameters, ("pandas",), False, True, True),
-        OperationDefinition("cast_types", "1.0.0", CastTypesParameters, ("pandas",), True, True, False),
-    )
-})
+class OperationRegistry:
+    """Retain released definitions and choose a default only for new admissions."""
+
+    def __init__(self) -> None:
+        self._versions: dict[tuple[str, str], OperationDefinition] = {}
+        self._current: dict[str, OperationDefinition] = {}
+
+    @property
+    def current(self):
+        return MappingProxyType(self._current)
+
+    def register(self, definition: OperationDefinition, *, current: bool = True) -> None:
+        key = (definition.name, definition.semantic_version)
+        if key in self._versions:
+            raise ValueError(f"Operation {definition.name}@{definition.semantic_version} is already registered.")
+        self._versions[key] = definition
+        if current:
+            self._current[definition.name] = definition
+
+    def released(self, operation: str) -> list[OperationDefinition]:
+        return [definition for (name, _), definition in self._versions.items() if name == operation]
+
+    def resolve(self, operation: str, version: str | None = None) -> OperationDefinition:
+        try:
+            return self._current[operation] if version is None else self._versions[(operation, version)]
+        except KeyError:
+            suffix = f"@{version}" if version is not None else ""
+            raise ValueError(f"Unsupported transformation operation: {operation}{suffix}.") from None
+
+
+OPERATION_REGISTRY = OperationRegistry()
+for _definition in (
+    OperationDefinition("drop_columns", "1.0.0", DropColumnsParameters, ("pandas", "polars", "duckdb"), True, True, True, handlers.drop_columns_v1, handlers.drop_projection_v1),
+    OperationDefinition("rename_columns", "1.0.0", RenameColumnsParameters, ("pandas", "polars", "duckdb"), True, True, True, handlers.rename_columns_v1, handlers.rename_projection_v1),
+    OperationDefinition("fill_nulls", "1.0.0", FillNullsParameters, ("pandas",), True, True, False, handlers.fill_nulls_v1),
+    OperationDefinition("drop_duplicates", "1.0.0", DropDuplicatesParameters, ("pandas",), False, True, True, handlers.drop_duplicates_v1),
+    OperationDefinition("cast_types", "1.0.0", CastTypesParameters, ("pandas",), True, True, False, handlers.cast_types_v1),
+):
+    OPERATION_REGISTRY.register(_definition)
+OPERATIONS = OPERATION_REGISTRY.current
 
 ENGINE_FORMATS = MappingProxyType({
     "pandas": (".csv", ".json", ".xls", ".xlsx", ".parquet"),
@@ -109,19 +143,48 @@ ENGINE_FORMATS = MappingProxyType({
 })
 
 
-def operation_definition(operation: str) -> OperationDefinition:
-    try:
-        return OPERATIONS[operation]
-    except KeyError:
-        raise ValueError(f"Unsupported transformation operation: {operation}.") from None
+def operation_definition(operation: str, version: str | None = None) -> OperationDefinition:
+    return OPERATION_REGISTRY.resolve(operation, version)
 
 
-def validate_operation(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
+def validate_operation(
+    operation: str, parameters: dict[str, Any], *, version: str | None = None,
+) -> dict[str, Any]:
     """Reject malformed parameters without changing existing idempotency bodies."""
-    definition = operation_definition(operation)
+    definition = operation_definition(operation, version)
     validated = definition.parameters_model.model_validate(parameters)
-    # An omitted empty mapping remains omitted, matching previously saved requests.
     return validated.model_dump(exclude_unset=True)
+
+
+def validate_request_operation(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    """Accept released wire contracts so a pre-upgrade request can be replayed.
+
+    Admission still validates a *new* request against the current definition.
+    A historical schema is not permission to submit new work with old semantics.
+    """
+    current = operation_definition(operation)
+    try:
+        validate_operation(operation, parameters, version=current.semantic_version)
+        return parameters
+    except ValidationError as current_error:
+        for definition in OPERATION_REGISTRY.released(operation):
+            if definition.semantic_version == current.semantic_version:
+                continue
+            try:
+                validate_operation(operation, parameters, version=definition.semantic_version)
+                return parameters
+            except ValidationError:
+                continue
+        raise current_error
+
+
+def execute_operation(frame: Any, operation: str, parameters: dict, *, version: str | None = None) -> Any:
+    definition = operation_definition(operation, version)
+    validated = validate_operation(operation, parameters, version=definition.semantic_version)
+    result = definition.pandas_handler(frame, validated)
+    if result.shape[1] == 0:
+        raise ValueError("A dataset must keep at least one column.")
+    return result
 
 
 def validate_operation_capability(
@@ -130,14 +193,15 @@ def validate_operation_capability(
     *,
     engine_name: str,
     input_path: Path | str,
+    version: str | None = None,
 ) -> TransformationPlan:
     """Validate the same executable plan before preview and durable admission.
 
     This is a metadata preflight, not a promise of execution success. Native
     adapters still verify output types and resource limits before publication.
     """
-    definition = operation_definition(operation)
-    validated = validate_operation(operation, parameters)
+    definition = operation_definition(operation, version)
+    validated = validate_operation(operation, parameters, version=definition.semantic_version)
     if engine_name not in ENGINE_FORMATS:
         raise EngineCapabilityError(f"Unknown transformation engine: {engine_name}.")
     if engine_name not in definition.engines:
@@ -150,7 +214,7 @@ def validate_operation_capability(
             f"The {engine_name} engine does not support {path.suffix or 'this'} input. "
             "Native engines require Parquet input; choose pandas for other formats."
         )
-    plan = TransformationPlan(operation, validated)
+    plan = TransformationPlan(operation, validated, definition.semantic_version)
     if engine_name != "pandas":
         import pyarrow.parquet as pq
 

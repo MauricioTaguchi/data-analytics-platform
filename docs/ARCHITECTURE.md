@@ -24,10 +24,10 @@ flowchart TD
 
 - **React:** authentication lifecycle, dataset workflows, dashboards, reports, and job monitoring.
 - **FastAPI:** authorization, request validation, orchestration, and stable API contracts.
-- **PostgreSQL:** users, refresh sessions, projects, datasets, transformations, dashboards, charts, reports, durable jobs, and the transactional task outbox.
+- **PostgreSQL:** users, refresh sessions, projects, datasets, snapshot manifests, versioned transformations and quality contracts, evaluation evidence, dashboards, charts, reports, durable jobs, and the transactional task outbox.
 - **Redis:** shared cache, rate-limit counters, Celery broker, and transient task results.
-- **Celery worker:** import validation, profiling, transformations, and PDF generation outside API requests.
-- **Recovery scheduler:** a standalone `python -m app.scheduler` process that directly reconciles database leases, dispatches the outbox, and runs storage/session/history cleanup. Its execution does not depend on receiving a Celery task through Redis.
+- **Celery worker:** supervised import inspection, profiling, transformations, previews and quality evaluation, plus PDF generation outside API requests. Compose separates interactive and bulk queues.
+- **Recovery scheduler:** a standalone `python -m app.scheduler` process that directly reconciles database leases, dispatches the outbox, and runs storage/session/history cleanup and opt-in snapshot expiration. Its execution does not depend on receiving a Celery task through Redis.
 - **Alembic:** the only production schema-management path.
 - **Versioned storage:** immutable dataset outputs and generated reports behind a replaceable boundary.
 
@@ -41,7 +41,7 @@ stateDiagram-v2
     processing --> failed: validation fails
     ready --> profiling: profiling worker starts
     profiling --> profiled: profile committed
-    profiling --> failed: profiling fails
+    profiling --> ready: profiling fails or cancels
     ready --> transforming: transformation accepted
     profiled --> transforming: transformation accepted
     transforming --> ready: new version committed
@@ -60,6 +60,26 @@ Import is the one intentional two-phase admission path. An outer ASGI guard chec
 
 An idempotency key is unique per dataset and user. Repeated submissions return the existing transformation only when operation, parameters, and expected version match; reusing the key for a different request is rejected.
 
+## Integrity and retained evidence
+
+New uploads and transformation outputs commit origin-time SHA-256 manifests with their dataset state. Undo hashes the prior file outside row locks, then fences its identity, availability and current revision before committing the restored pointer and immutable receipt. Legacy snapshots are explicitly unverified. PostgreSQL triggers protect audit rows and snapshot identity; a separate runtime role limits writable columns. Database owners remain outside this trust boundary.
+
+Retention is disabled by default. The scheduler expires old manifest-backed files only after preserving the current head, pins, configured recent history and datasets with pending/running/cancelling jobs. Expiration and artifact deletion intent share a transaction; unlinking follows through the existing collector. Audit events and manifest identity outlive physical bytes.
+
+Quality contracts have immutable versions. Admission binds a contract, dataset revision and snapshot digest with its job/outbox record. A supervised child evaluates the full snapshot; attempt-fenced completion saves evidence and job success together. Results for an older revision remain useful but are marked stale. These checks are advisory and do not block unrelated transformations automatically.
+
+## Queries and execution contracts
+
+The operation registry associates released parameter schemas with versioned handlers. Admission persists both engine and operation version; execution and audit use those values after deployment changes. The live frontend discovers supported operations from the catalog. Frames remain inside the selected engine; subprocess supervision enforces deadlines and samples resource use while lease checkpoints remain in the parent.
+
+Eligible Parquet charts execute projection, strict typed filtering and aggregation directly in DuckDB. Unsupported type/histogram cases use projected Pandas fallback; non-Parquet sources use bounded eager reads. Per-process concurrency, query budgets and a bounded revision/tenant-aware cache control API work. This is synchronous analytics, not a distributed query service.
+
+## Operations and recovery boundary
+
+Protected processing/metrics endpoints publish durable queue/outbox observations and process/storage health. A persisted correlation ID travels through admission, dispatch and workers to retained results. This is operational correlation, not an OpenTelemetry trace backend.
+
+The backup CLI captures database and immutable files during a coordinated maintenance window, verifies an archive manifest and supports isolated restore. An optional versioned S3 destination stores those archives. Runtime reads/publication still use local paths; the archive adapter does not make replicas storage-safe. See [Disaster recovery](DISASTER_RECOVERY.md) and [Known limitations](LIMITATIONS.md).
+
 ## Production-minded runtime invariants
 
 1. API startup never creates tables; migrations run through Alembic.
@@ -69,5 +89,8 @@ An idempotency key is unique per dataset and user. Repeated submissions return t
 5. Non-upload request bodies are bounded independently from multipart uploads before framework parsing; declared and chunked transfers follow the same byte ceiling.
 6. Refresh tokens are single-use and are revoked during rotation or logout.
 7. A committed background operation always has a durable dispatch record; broker publication is never the sole record of intent.
+
+8. New snapshot identity and audit receipts are committed with head changes; retained legacy history is never assigned fabricated checksums.
+9. Queued transformations execute their admitted handler version; quality evidence binds the evaluated revision.
 
 These invariants describe application behavior enforced by the current implementation. They do not imply high availability, disaster recovery, formal service objectives, or independent security assurance. See [Known limitations](LIMITATIONS.md).

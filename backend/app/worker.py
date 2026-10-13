@@ -1,5 +1,7 @@
 from celery import Celery
+from kombu import Queue
 from app.core.config import settings
+from app.core.telemetry import install_worker_telemetry
 
 broker_url = "memory://" if settings.CELERY_EAGER else settings.REDIS_URL
 result_backend = "cache+memory://" if settings.CELERY_EAGER else settings.REDIS_URL
@@ -14,6 +16,8 @@ celery_app = Celery(
         "app.tasks.maintenance_tasks",
         "app.tasks.outbox_tasks",
         "app.tasks.retention_tasks",
+        "app.tasks.quality_tasks",
+        "app.tasks.snapshot_tasks",
     ],
 )
 
@@ -45,4 +49,14 @@ celery_app.conf.update(
     worker_max_memory_per_child=settings.CELERY_WORKER_MAX_MEMORY_KB,
     worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS,
     worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
+    task_default_queue="interactive",
+    task_queues=(Queue("interactive"), Queue("bulk")),
+    task_routes={
+        "datasets.import": {"queue": "bulk"},
+        "datasets.profile": {"queue": "bulk"},
+        "datasets.transform": {"queue": "bulk"},
+        "datasets.quality_evaluate": {"queue": "bulk"},
+    },
 )
+
+install_worker_telemetry()

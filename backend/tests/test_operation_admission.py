@@ -34,7 +34,7 @@ def test_preview_keeps_admitted_engine_after_configuration_change(client, auth_h
     monkeypatch.setattr(settings, "TRANSFORMATION_ENGINE", "duckdb")
     with SessionLocal() as db:
         event = db.query(TaskOutbox).filter_by(task_id=task_id).one()
-        assert event.payload_json["args"][-1] == "pandas"
+        assert event.payload_json["args"][-2:] == ["pandas", "1.0.0"]
         assert OutboxService.dispatch_task(db, task_id)
     result = wait_for_job(client, auth_headers, task_id)
     assert result["before"]["rows"] == 3

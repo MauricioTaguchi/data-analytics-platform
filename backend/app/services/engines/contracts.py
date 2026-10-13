@@ -25,6 +25,7 @@ class SnapshotRef:
 class TransformationPlan:
     operation: str
     parameters: Mapping[str, Any]
+    operation_version: str = "1.0.0"
 
     def validate_schema(self, schema: Any, *, engine_name: str) -> list[tuple[str, str]]:
         """Check native projection semantics from Arrow metadata before execution."""
@@ -52,34 +53,15 @@ class TransformationPlan:
         """Compile a projection without interpreting names as SQL or expressions."""
         if len(columns) != len(set(columns)):
             raise EngineCapabilityError("Input contains duplicate column names.")
-        if self.operation == "drop_columns":
-            requested = self.parameters.get("columns", [])
-            if not isinstance(requested, list) or any(not isinstance(name, str) for name in requested):
-                raise ValueError("columns must be a list of column names.")
-            unknown = set(requested) - set(columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            dropped = set(requested)
-            result = [(name, name) for name in columns if name not in dropped]
-        elif self.operation == "rename_columns":
-            mapping = self.parameters.get("mapping", {})
-            if not isinstance(mapping, dict) or any(
-                not isinstance(source, str) or not isinstance(target, str) or "\x00" in target
-                for source, target in mapping.items()
-            ):
-                raise ValueError("mapping must map column names to valid string names.")
-            unknown = set(mapping) - set(columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            result = [(name, mapping.get(name, name)) for name in columns]
-            renamed = [target for _, target in result]
-            if len(renamed) != len(set(renamed)):
-                raise ValueError("Renaming would create duplicate column names.")
-        else:
+        from app.services.operations import operation_definition
+
+        definition = operation_definition(self.operation, self.operation_version)
+        if definition.projection_handler is None:
             raise EngineCapabilityError(
                 "The native engines currently support drop_columns and rename_columns only. "
                 "Choose pandas explicitly for other operations."
             )
+        result = definition.projection_handler(columns, dict(self.parameters))
         if not result:
             raise ValueError("A dataset must keep at least one column.")
         return result
@@ -106,6 +88,23 @@ class ResourcePolicy:
             self.max_columns, self.max_column_name_chars, self.max_rows,
         ) <= 0:
             raise ValueError("Execution limits must be positive.")
+
+    @classmethod
+    def configured(cls, *, quota_remaining_bytes: int | None = None) -> "ResourcePolicy":
+        from app.core.config import settings
+
+        return cls(
+            max_output_bytes=settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024,
+            quota_remaining_bytes=(quota_remaining_bytes if quota_remaining_bytes is not None
+                                   else settings.USER_STORAGE_QUOTA_MB * 1024 * 1024),
+            threads=settings.TRANSFORMATION_ENGINE_THREADS,
+            memory_limit_bytes=settings.TRANSFORMATION_ENGINE_MEMORY_MB * 1024 * 1024,
+            max_spill_bytes=settings.TRANSFORMATION_ENGINE_SPILL_MB * 1024 * 1024,
+            timeout_seconds=settings.TRANSFORMATION_ENGINE_TIMEOUT_SECONDS,
+            max_columns=settings.MAX_DATASET_COLUMNS,
+            max_column_name_chars=settings.MAX_DATASET_COLUMN_NAME_CHARS,
+            max_rows=settings.MAX_DATASET_ROWS,
+        )
 
     @property
     def output_limit_bytes(self) -> int:

@@ -403,6 +403,7 @@ def get_job_status(
         "status": job.status,
         "progress": job.progress,
         "stage": job.stage,
+        "correlation_id": job.correlation_id,
         "error_message": job.error_message,
         "result": job.result_json,
     }
@@ -509,7 +510,7 @@ def preview_transform(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     engine_name = payload.engine or settings.TRANSFORMATION_ENGINE
     try:
-        validate_operation_capability(
+        plan = validate_operation_capability(
             payload.operation, payload.parameters,
             engine_name=engine_name, input_path=Path(dataset.stored_path),
         )
@@ -522,7 +523,7 @@ def preview_transform(
         user.id,
         dataset_id,
         "transformation-preview",
-        task_args=[dataset_id, payload.operation, payload.parameters, payload.expected_version, engine_name],
+        task_args=[dataset_id, payload.operation, payload.parameters, payload.expected_version, engine_name, plan.operation_version],
     )
     db.commit()
     dispatch_or_defer(db, task_id, preview_transformation_task)

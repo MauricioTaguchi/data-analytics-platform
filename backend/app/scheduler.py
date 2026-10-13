@@ -125,6 +125,8 @@ class Scheduler:
                 temporary_path = Path(handle.name)
                 json.dump(payload, handle)
             temporary_path.replace(self.heartbeat)
+            from app.core.telemetry import publish_heartbeat
+            publish_heartbeat("scheduler", details={"activities": payload["activities"]})
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -185,6 +187,7 @@ def default_actions() -> list[ScheduledAction]:
         remove_orphaned_storage_files,
     )
     from app.tasks.retention_tasks import remove_expired_job_history
+    from app.tasks.snapshot_tasks import expire_dataset_snapshots
 
     return [
         ScheduledAction("reconcile-jobs", reconcile_jobs, interval=10.0, max_runtime=120.0),
@@ -192,6 +195,7 @@ def default_actions() -> list[ScheduledAction]:
         ScheduledAction("cleanup-storage", remove_orphaned_storage_files.run, interval=3_600.0, max_runtime=1_800.0),
         ScheduledAction("cleanup-sessions", remove_expired_refresh_sessions.run, interval=3_600.0, max_runtime=120.0),
         ScheduledAction("cleanup-history", remove_expired_job_history.run, interval=86_400.0, max_runtime=120.0),
+        ScheduledAction("expire-snapshots", expire_dataset_snapshots.run, interval=3_600.0, max_runtime=300.0),
     ]
 
 

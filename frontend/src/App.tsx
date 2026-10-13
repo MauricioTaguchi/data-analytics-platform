@@ -6,6 +6,8 @@ import { DatasetWorkspace } from "./components/DatasetWorkspace";
 import { LineageTimeline } from "./components/LineageTimeline";
 import { OperationsMonitor } from "./components/OperationsMonitor";
 import { ReportsWorkspace } from "./components/ReportsWorkspace";
+import { QualityContracts } from "./components/QualityContracts";
+import { SnapshotHistory } from "./components/SnapshotHistory";
 import { TransformationBuilder } from "./components/TransformationBuilder";
 import { WorkspaceSidebar, type WorkspaceSection } from "./components/WorkspaceSidebar";
 import { WorkspaceIcon, type WorkspaceIconName } from "./components/WorkspaceIcon";
@@ -41,7 +43,7 @@ export function App() {
   const auth = useAuthentication();
   const jobs = useProfilingJob();
   const workspace = useDatasetUpload();
-  const transformations = useTransformations(workspace.dataset, workspace.rows, workspace.setRows, workspace.refresh, jobs.track);
+  const transformations = useTransformations(workspace.dataset, workspace.rows, workspace.setRows, workspace.refresh, jobs.track, workspace.columns, auth.live);
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("overview");
   const [notice, setNotice] = useState("The portfolio sample is ready. Connect the API to enable persistent workflows.");
   const [busy, setBusy] = useState(false);
@@ -192,8 +194,8 @@ export function App() {
     } catch (error) { setNotice(describeApiError(error)); }
   }
 
-  const content = activeSection === "datasets" ? <DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} />
-    : activeSection === "transformations" ? <div className="work-grid"><TransformationBuilder live={auth.live} busy={combinedBusy || transformations.undoNeedsRecovery} columns={workspace.columns} operation={transformations.operation} column={transformations.column} value={transformations.value} preview={transformations.preview} onOperation={transformations.setOperation} onColumn={transformations.setColumn} onValue={transformations.setValue} onPreview={previewTransformation} onApply={applyTransformation} /><LineageTimeline history={transformations.history} sourceName={workspace.datasetName} live={auth.live} canUndo={auth.live ? transformations.history.some((item) => item.status === "completed" && !item.undone_at) : transformations.localSnapshots.length > 0} busy={combinedBusy} undoNeedsRecovery={transformations.undoNeedsRecovery} onUndo={undoTransformation} /></div>
+  const content = activeSection === "datasets" ? <><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} /><QualityContracts key={workspace.dataset?.id || "demo"} datasetId={workspace.dataset?.id || null} version={workspace.dataset?.version || 0} columns={workspace.columns} busy={combinedBusy} onTrack={jobs.track} /></>
+    : activeSection === "transformations" ? <div className="work-grid"><TransformationBuilder live={auth.live} busy={combinedBusy || transformations.undoNeedsRecovery || (auth.live && !workspace.dataset)} columns={workspace.columns} operation={transformations.operation} draft={transformations.draft} engine={transformations.engine} catalog={transformations.catalog} catalogError={transformations.catalogError} preview={transformations.preview} onOperation={transformations.setOperation} onDraft={transformations.setDraft} onEngine={transformations.setEngine} onRetryCatalog={transformations.retryCatalog} onPreview={previewTransformation} onApply={applyTransformation} /><div className="side-stack"><LineageTimeline history={transformations.history} sourceName={workspace.datasetName} live={auth.live} canUndo={auth.live ? transformations.history.some((item) => item.status === "completed" && !item.undone_at) : transformations.localSnapshots.length > 0} busy={combinedBusy} undoNeedsRecovery={transformations.undoNeedsRecovery} onUndo={undoTransformation} />{workspace.dataset ? <SnapshotHistory key={workspace.dataset.id} datasetId={workspace.dataset.id} version={workspace.dataset.version} busy={combinedBusy} /> : null}</div></div>
     : activeSection === "dashboards" ? <DashboardWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} rows={workspace.rows} columns={workspace.columns} externalBusy={combinedBusy} onNotice={setNotice} onBusyChange={setBusy} />
     : activeSection === "reports" ? <ReportsWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} datasetName={workspace.datasetName} rows={workspace.dataset?.row_count || workspace.rows.length} columns={workspace.dataset?.column_count || workspace.columns.length} externalBusy={combinedBusy} onNotice={setNotice} onTrack={jobs.track} onBusyChange={setBusy} />
     : activeSection === "monitoring" ? <OperationsMonitor jobs={jobs.jobs} live={auth.live} apiStatus={apiStatus} onResume={(taskId) => void jobs.resume(taskId).then(() => setNotice("Monitoring resumed and the job completed."), (error) => setNotice(describeApiError(error)))} onCancel={(taskId) => void jobs.cancel(taskId).then(() => setNotice("Cancellation requested. The worker will stop at the next safe checkpoint."), (error) => setNotice(describeApiError(error)))} />

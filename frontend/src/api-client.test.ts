@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, downloadDataset, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
+import { apiClient, authenticate, fetchOperationCatalog, applyDatasetTransformation, saveQualityContract, startQualityEvaluation, pinDatasetSnapshot, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, downloadDataset, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
 
 const originalAdapter = apiClient.defaults.adapter;
 
@@ -356,5 +356,47 @@ describe("API session client", () => {
     await cancelJob(taskId, { retryNotFound: true });
 
     expect(attempts).toBe(2);
+  });
+});
+
+
+describe("governed dataset APIs", () => {
+  it("rejects unavailable or empty catalogs rather than inventing local live capabilities", async () => {
+    apiClient.defaults.adapter = async (config) => response(config, 200, []);
+    await expect(fetchOperationCatalog()).rejects.toThrow("invalid operation catalog");
+  });
+  it("submits explicitly chosen engines with typed scalar maps", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      expect(config.url).toBe("/datasets/7/transform");
+      expect(JSON.parse(String(config.data))).toEqual({ operation: "fill_nulls", parameters: { values: { id: "001", active: false } }, expected_version: 4, engine: "pandas" });
+      expect(config.headers.get("Idempotency-Key")).toBe("job-key");
+      return response(config, 202, { task_id: "job-key" });
+    };
+    await applyDatasetTransformation(7, "fill_nulls", { values: { id: "001", active: false } }, 4, "job-key", "pandas");
+  });
+  it("uses contract revision guards and durable evaluation identities", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      const data = JSON.parse(String(config.data));
+      if (config.url?.endsWith("/contracts")) {
+        expect(data).toEqual({ name: "Orders", rules: [{ id: "required", kind: "not_null", column: "id" }], expected_contract_version: 2 });
+        return response(config, 201, { id: 9, version: 3 });
+      }
+      expect(config.url).toBe("/datasets/7/quality/evaluations");
+      expect(data).toEqual({ contract_id: 9, expected_version: 4 });
+      expect(config.headers.get("Idempotency-Key")).toBe("quality-job");
+      expect(config.headers.get("X-Task-ID")).toBe("quality-job");
+      return response(config, 202, { task_id: "quality-job" });
+    };
+    await saveQualityContract(7, "Orders", [{ id: "required", kind: "not_null", column: "id" }], 2);
+    await startQualityEvaluation(7, 9, 4, "quality-job");
+  });
+  it("pins only the requested snapshot and leaves retention validation to the API", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      expect(config.method).toBe("patch");
+      expect(config.url).toBe("/datasets/7/snapshots/snapshot-id");
+      expect(JSON.parse(String(config.data))).toEqual({ pinned: true });
+      return response(config, 200, { id: "snapshot-id", pinned: true });
+    };
+    expect(await pinDatasetSnapshot(7, "snapshot-id", true)).toEqual({ id: "snapshot-id", pinned: true });
   });
 });

@@ -30,7 +30,10 @@ The response retains the existing transformation fields and adds:
 {
   "event_id": "8518075acb0d4cdeaf8f39da2e1c8737ff",
   "previous_version": 7,
-  "result_version": 8
+  "result_version": 8,
+  "snapshot_integrity": "verified",
+  "snapshot_id": "635be05a8d8d483e91d64a0ad9c30797",
+  "correlation_id": "request-42"
 }
 ```
 
@@ -45,11 +48,17 @@ checks. The header remains optional for older clients, but requests without a
 key cannot resolve a lost commit acknowledgement by replaying a receipt. Their
 revision check still prevents the same observed revision from being undone twice.
 
-Undo checks that its destination snapshot is a readable, nonempty regular file
-before changing the head. This detects missing/unavailable storage, not arbitrary
-file corruption. Recorded hashes support integrity investigations; periodic
-verification, storage backups and coordinated restore drills are still deployment
-responsibilities. Undo does not perform a full hash scan under database locks.
+New uploads and transformation outputs record origin-time SHA-256 manifests.
+Undo releases its read transaction before hashing the destination, compares digest
+and size, then reacquires the account/dataset locks and fences the revision,
+manifest availability and file identity. A mismatch, missing file or expired
+snapshot leaves the head and audit unchanged. Legacy snapshots have no original
+digest: their response is explicitly `unverified`, not retroactively certified.
+See [Snapshot integrity](SNAPSHOT_INTEGRITY.md) for provenance and retention.
+
+Correlation IDs are captured in new receipts and survive operational job cleanup.
+They connect request/dispatch/worker logs; they are not complete distributed
+traces. Old immutable receipts are not rewritten to invent correlation metadata.
 
 The response requires no cache invalidation or database refresh after commit.
 Dataset profiles are read from the database and are invalidated in that same
@@ -72,23 +81,12 @@ revisions, timestamps or checksums.
 
 ## Guarantees and deployment limits
 
-- Application services only append events. SQLAlchemy ORM updates and deletes
-  are rejected. Direct SQL, bulk ORM statements and database administrators are
-  not blocked by these ORM hooks; this is **not** a tamper-proof audit store.
-  A deployment that requires that guarantee must apply database role restrictions
-  or triggers and an independently retained audit export.
-- Events are retained without automatic expiry. Their retention policy is
-  separate from the 30-day default for operational job history. Historical
-  snapshots remain pinned for undo; event retention does not implement snapshot
-  expiry or data deletion.
-- Migration `20261013_0011` creates the event table without changing existing
-  datasets or fabricating historical events. Run migrations before deploying
-  the new API/workers, and drain/stop old workers during rollout if every new
-  completion must be recorded. Older executors cannot write the new events.
-- The operation version describes the executed contract, not an archived runtime
-  capable of reproducing arbitrary historical software environments.
+- Application services append events. ORM guards and PostgreSQL migration triggers reject update/delete/truncate operations; snapshot identity is immutable while retention fields remain editable. Apply the reviewed runtime-role grants with a separate migration owner. Owners/superusers can bypass these controls, so this is **not** an administrator-proof audit store.
+- Events and manifest identity are retained without automatic expiry. Operational jobs have a separate retention window. Snapshot bytes can expire only when opt-in retention is enabled; active, pinned, recent and in-flight data remain protected. An expired undo target returns an explicit conflict instead of changing the head.
+- Migration `20261013_0011` introduced events without fabricating history; `0012` adds snapshot manifests and PostgreSQL guards, `0013` pins operation handlers, and the current chain ends at `20261013_0015`. Drain requests/jobs and stop old workers/schedulers before migrating and starting the new release. See [Upgrade procedure](PROCESSING_RECOVERY.md).
+- Transformation engine and semantic version are persisted at admission and used by the executor and event. Released handlers remain available across default-version changes. This does not archive every dependency or reproduce arbitrary historical software environments.
 
 Regression coverage in `backend/tests/test_dataset_audit_receipts.py` includes
 lost commit acknowledgement, rollback before commit, repeated keys, intervening
 head changes, unavailable snapshots, Redis failure after undo, retained terminal
-results, ownership isolation, pagination and rejected ORM event mutations.
+results, ownership isolation, pagination and rejected ORM event mutations. Snapshot tests additionally exercise same-size corruption, final file fencing, expiration and pin authorization; the PostgreSQL process test verifies direct SQL guards after migrations.

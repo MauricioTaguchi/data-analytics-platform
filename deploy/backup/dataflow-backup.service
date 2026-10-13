@@ -1,0 +1,16 @@
+[Unit]
+Description=DataFlow verified maintenance backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/dataflow/backup.env
+ExecStart=/srv/dataflow/deploy/backup/run-backup.sh
+# SIGTERM reaches the wrapper, whose trap restarts services after a failed capture.
+TimeoutStartSec=infinity
+TimeoutStopSec=300
+KillMode=control-group
+UMask=0077
+StandardOutput=journal
+StandardError=journal

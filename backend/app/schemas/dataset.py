@@ -3,7 +3,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.validation import bounded_json
-from app.services.operations import EngineName, validate_operation
+from app.services.operations import EngineName, validate_request_operation
 
 
 class DatasetResponse(BaseModel):
@@ -48,7 +48,7 @@ class TransformationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_operation_parameters(self) -> "TransformationRequest":
-        self.parameters = validate_operation(self.operation, self.parameters)
+        self.parameters = validate_request_operation(self.operation, self.parameters)
         return self
 
 
@@ -66,6 +66,7 @@ class UndoRequest(BaseModel):
 class TransformationResponse(BaseModel):
     id: int
     operation: str
+    operation_version: str = "1.0.0"
     parameters: dict[str, Any]
     status: str
     task_id: str | None = None
@@ -80,9 +81,13 @@ class TransformationResponse(BaseModel):
 
 
 class UndoResponse(TransformationResponse):
+    correlation_id: str | None = None
     event_id: str
     previous_version: int
     result_version: int
+
+    snapshot_integrity: str = "unverified"
+    snapshot_id: str | None = None
 
 
 class DatasetEventResponse(BaseModel):
@@ -100,6 +105,7 @@ class DatasetEventResponse(BaseModel):
 
 class JobResponse(BaseModel):
     task_id: str
+    correlation_id: str | None = None
     status: str
     progress: int = 0
     stage: str | None = None

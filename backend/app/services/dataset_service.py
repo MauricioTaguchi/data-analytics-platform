@@ -12,6 +12,7 @@ from zipfile import BadZipFile, ZipFile
 import pandas as pd
 import numpy as np
 from fastapi import UploadFile
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,7 @@ from app.services.job_service import JobService
 from app.services.storage_service import storage
 from app.services.artifact_service import ArtifactService
 from app.services.dataset_audit_service import DatasetAuditService
+from app.services.snapshot_service import SnapshotService
 from app.services.engines import (
     PandasEngineAdapter, ResourcePolicy, SnapshotRef, TransformationPlan, select_engine,
 )
@@ -409,49 +411,12 @@ class DatasetService:
             raise
 
     @staticmethod
-    def apply_operation(df: pd.DataFrame, operation: str, parameters: dict) -> pd.DataFrame:
-        from app.services.operations import validate_operation
-        from app.services.safe_cast import safe_cast_column
+    def apply_operation(
+        df: pd.DataFrame, operation: str, parameters: dict, *, version: str | None = None,
+    ) -> pd.DataFrame:
+        from app.services.operations import execute_operation
 
-        parameters = validate_operation(operation, parameters)
-        # Pandas' non-inplace operations below already allocate their result.
-        # Only column assignment during casting needs an explicit source copy.
-        result = df.copy(deep=True) if operation == "cast_types" else df
-        if operation == "drop_columns":
-            columns = parameters.get("columns", [])
-            unknown = set(columns) - set(result.columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            result = result.drop(columns=columns)
-        elif operation == "rename_columns":
-            mapping = parameters.get("mapping", {})
-            unknown = set(mapping) - set(result.columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            renamed = [mapping.get(column, column) for column in result.columns]
-            if len(renamed) != len(set(renamed)):
-                raise ValueError("Renaming would create duplicate column names.")
-            result = result.rename(columns=mapping)
-        elif operation == "fill_nulls":
-            values = parameters.get("values", {})
-            unknown = set(values) - set(result.columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            result = result.fillna(values)
-        elif operation == "drop_duplicates":
-            result = result.drop_duplicates()
-        elif operation == "cast_types":
-            mapping = parameters.get("mapping", {})
-            unknown = set(mapping) - set(result.columns)
-            if unknown:
-                raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
-            for column, dtype in mapping.items():
-                result[column] = safe_cast_column(result[column], dtype)
-        else:
-            raise ValueError("Unsupported transformation operation.")
-        if result.shape[1] == 0:
-            raise ValueError("A dataset must keep at least one column.")
-        return result
+        return execute_operation(df, operation, parameters, version=version)
 
     @classmethod
     async def stage_upload(
@@ -483,6 +448,7 @@ class DatasetService:
                     if b"\x00" in staged_file.read(1024):
                         raise ValueError("The uploaded text file contains null bytes.")
             cls.preflight_binary_dataset(path)
+            uploaded_identity = await run_in_threadpool(SnapshotService.digest, path)
 
             # PostgreSQL serializes admissions for the same account on this
             # row. SQLite's FOR UPDATE is a no-op, so local test/development
@@ -505,6 +471,11 @@ class DatasetService:
             db.add(dataset)
             db.flush()
             db.refresh(dataset)
+            uploaded_identity.assert_unchanged(path)
+            SnapshotService.record(
+                db, dataset_id=dataset.id, path=path, version=1,
+                size_bytes=uploaded_identity.size_bytes, sha256=uploaded_identity.sha256,
+            )
             return dataset
         except Exception:
             db.rollback()
@@ -678,7 +649,8 @@ class DatasetService:
     def preview_transformation(
         cls, dataset: ReadySnapshot, operation: str, parameters: dict, *, engine_name: str | None = None,
         output_path: Path | None = None, checkpoint: Callable[[], object] | None = None,
-        quota_remaining_bytes: int | None = None,
+        quota_remaining_bytes: int | None = None, operation_version: str | None = None,
+        _child_adapter=None,
     ) -> dict:
         from app.services.operations import validate_operation_capability
 
@@ -687,8 +659,16 @@ class DatasetService:
         plan = validate_operation_capability(
             operation, parameters,
             engine_name=selected_engine,
-            input_path=Path(dataset.stored_path),
+            input_path=Path(dataset.stored_path), version=operation_version,
         )
+        if output_path is not None and _child_adapter is None:
+            from app.services.engines.runner import run_preview
+
+            return run_preview(
+                SnapshotRef(Path(dataset.stored_path)), plan,
+                ResourcePolicy.configured(quota_remaining_bytes=quota_remaining_bytes), checkpoint,
+                engine_name=selected_engine, output_path=output_path,
+            )
         before = cls.read_dataframe(Path(dataset.stored_path))
         before_summary = {
             "rows": len(before),
@@ -697,10 +677,7 @@ class DatasetService:
         }
         if output_path is not None:
             del before
-            adapter = select_engine(selected_engine, pandas=PandasEngineAdapter(
-                read=cls.read_dataframe, transform=cls.apply_operation,
-                validate=cls.validate_dataframe_structure, write=cls.write_dataframe_limited,
-            ))
+            adapter = _child_adapter or select_engine(selected_engine, pandas=PandasEngineAdapter())
             adapter.materialize(
                 SnapshotRef(Path(dataset.stored_path)), plan, output_path,
                 ResourcePolicy(
@@ -723,7 +700,7 @@ class DatasetService:
             after = cls.read_dataframe(output_path)
         else:
             # Kept for direct callers that only need an in-memory Pandas preview.
-            after = cls.apply_operation(before, operation, dict(plan.parameters))
+            after = cls.apply_operation(before, operation, dict(plan.parameters), version=plan.operation_version)
         cls.validate_dataframe_structure(after)
         preview_columns = list(after.columns[: settings.TRANSFORMATION_PREVIEW_MAX_COLUMNS])
         sample = after.loc[:, preview_columns].head(20)
@@ -804,7 +781,7 @@ class DatasetService:
         from app.services.operations import validate_operation_capability
 
         resolved_engine = engine_name or settings.TRANSFORMATION_ENGINE
-        validate_operation_capability(
+        plan = validate_operation_capability(
             operation, parameters, engine_name=resolved_engine, input_path=input_path,
         )
         output_path = storage.version_path(input_path)
@@ -817,6 +794,7 @@ class DatasetService:
             idempotency_key=idempotency_key,
             expected_version=expected_version,
             engine_name=resolved_engine,
+            operation_version=plan.operation_version,
             input_path=str(input_path),
             output_path=str(output_path),
             before_rows=int(dataset.row_count or 0),
@@ -878,6 +856,7 @@ class DatasetService:
         expected_version = int(transformation.expected_version)
         input_path_value = str(transformation.input_path)
         operation = str(transformation.operation)
+        operation_version = str(transformation.operation_version)
         parameters = deepcopy(transformation.parameters)
         engine_name = str(transformation.engine_name)
         task_id = transformation.task_id
@@ -914,12 +893,9 @@ class DatasetService:
             quota_remaining = max(0, settings.USER_STORAGE_QUOTA_MB * 1024 * 1024
                                   - cls.tracked_storage_usage_bytes(db, owner_id))
             db.commit()
-            adapter = select_engine(engine_name, pandas=PandasEngineAdapter(
-                read=cls.read_dataframe, transform=cls.apply_operation,
-                validate=cls.validate_dataframe_structure, write=cls.write_dataframe_limited,
-            ))
+            adapter = select_engine(engine_name, pandas=PandasEngineAdapter())
             artifact = adapter.materialize(
-                SnapshotRef(input_path), TransformationPlan(operation, parameters), temporary_path,
+                SnapshotRef(input_path), TransformationPlan(operation, parameters, operation_version), temporary_path,
                 ResourcePolicy(
                     max_output_bytes=settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024,
                     quota_remaining_bytes=quota_remaining,
@@ -954,6 +930,10 @@ class DatasetService:
             # LIVE, the new dataset head and SUCCESS commit together in the caller.
             ArtifactService.publish(db, reservation_id, attempt_token=attempt_token)
             storage.commit_temporary(temporary_path, final_path)
+            SnapshotService.record(
+                db, dataset_id=dataset_id, path=final_path, version=expected_version + 1,
+                size_bytes=artifact.size_bytes, sha256=artifact.sha256,
+            )
             updated = (db.query(Dataset).filter(
                 Dataset.id == dataset_id, Dataset.version == expected_version,
                 Dataset.stored_path == input_path_value, Dataset.deleted_at.is_(None),
@@ -994,13 +974,47 @@ class DatasetService:
     ) -> dict:
         if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 120):
             raise ValueError("Idempotency-Key must contain 1 to 120 characters.")
+        dataset_id = dataset.id
+        observed = (db.query(Dataset).execution_options(populate_existing=True)
+                    .join(Project, Project.id == Dataset.project_id)
+                    .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None), Project.owner_id == user_id)
+                    .first())
+        if observed is None:
+            raise ValueError("Dataset not found.")
+        fingerprint = DatasetAuditService.fingerprint(
+            kind="undo", dataset_id=dataset_id, expected_version=expected_version,
+        )
+        receipt = DatasetAuditService.replay(
+            db, dataset_id=dataset_id, actor_id=user_id, kind="undo",
+            idempotency_key=idempotency_key, request_fingerprint=fingerprint,
+        )
+        if receipt is not None:
+            db.rollback()
+            return receipt
+        DatasetService.ensure_ready(observed)
+        if observed.version != expected_version:
+            raise ValueError("Dataset version changed. Refresh and try again.")
+        candidate = (db.query(Transformation)
+                     .join(Dataset, Dataset.id == Transformation.dataset_id)
+                     .join(Project, Project.id == Dataset.project_id)
+                     .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None),
+                             Project.owner_id == user_id, Dataset.version == expected_version,
+                             Transformation.status == "completed", Transformation.undone_at.is_(None),
+                             Transformation.output_path == Dataset.stored_path)
+                     .order_by(Transformation.id.desc()).first())
+        if candidate is None:
+            raise ValueError("There is no completed transformation for the active dataset version to undo.")
+        candidate_id, restored_path = candidate.id, str(candidate.input_path)
+        verified_file, manifest_id = SnapshotService.verify(db, dataset_id, restored_path)
+        # Hashing runs without row locks. Fence the exact head, transformation,
+        # manifest and file identity before committing the restored pointer.
         JobService.lock_owner(db, user_id)
         locked_dataset = (
             db.query(Dataset)
             .execution_options(populate_existing=True)
             .join(Project, Project.id == Dataset.project_id)
             .filter(
-                Dataset.id == dataset.id,
+                Dataset.id == dataset_id,
                 Dataset.deleted_at.is_(None),
                 Project.owner_id == user_id,
             )
@@ -1039,16 +1053,13 @@ class DatasetService:
         )
         if not transformation:
             raise ValueError("There is no completed transformation for the active dataset to undo.")
-        # The collector preserves history, but an operator or volume failure can
-        # still remove it. Refuse to publish a missing/unreadable snapshot. This
-        # is an availability check, not a claim of cryptographic integrity.
+        if transformation.id != candidate_id or transformation.input_path != restored_path:
+            raise ValueError("Dataset changed during snapshot verification. Refresh and try again.")
+        manifest = SnapshotService.manifest(db, dataset_id, restored_path, lock=True)
+        if (manifest.id if manifest else None) != manifest_id or (manifest and manifest.availability != "AVAILABLE"):
+            raise ValueError("The previous snapshot expired during verification; the active dataset was not changed.")
         try:
-            restored_path = Path(transformation.input_path)
-            if not restored_path.is_file():
-                raise OSError("Snapshot is not a regular file.")
-            with restored_path.open("rb") as restored:
-                if not restored.read(1):
-                    raise OSError("Snapshot is empty.")
+            verified_file.assert_unchanged(restored_path)
         except OSError as exc:
             raise ValueError("The previous snapshot is unavailable; the active dataset was not changed.") from exc
         transformation.undone_at = datetime.now(timezone.utc)
@@ -1064,6 +1075,7 @@ class DatasetService:
         receipt = DatasetAuditService.record_undo(
             db, transformation, actor_id=user_id, previous_version=expected_version,
             idempotency_key=idempotency_key, request_fingerprint=fingerprint,
+            snapshot_integrity="verified" if manifest_id else "unverified", snapshot_id=manifest_id,
         )
         db.commit()
         # No database/cache read after commit: a lost acknowledgement is resolved

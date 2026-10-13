@@ -13,6 +13,7 @@ from app.schemas.dashboard import (
     DashboardResponse,
 )
 from app.services.dashboard_service import DashboardService
+from app.services.chart_query import ChartResourceError
 
 router = APIRouter()
 
@@ -93,5 +94,7 @@ def chart_data(
         raise HTTPException(status_code=404, detail="Chart not found.")
     try:
         return DashboardService.build_chart_data(db, chart, user.id)
+    except ChartResourceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "1"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
