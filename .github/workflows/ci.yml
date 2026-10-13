@@ -71,8 +71,6 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/dataflow-ui-review/artifacts/ui
     defaults:
       run:
         working-directory: frontend
@@ -101,6 +99,8 @@ jobs:
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Run desktop and mobile end-to-end tests
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/dataflow-ui-review/artifacts/ui
         run: pnpm test:e2e
       - name: Upload desktop and mobile UI evidence
         if: always()
