@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
+import { apiClient, authenticate, fetchOperationCatalog, applyDatasetTransformation, saveQualityContract, startQualityEvaluation, pinDatasetSnapshot, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, downloadDataset, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
 
 const originalAdapter = apiClient.defaults.adapter;
 
@@ -14,22 +14,83 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   apiClient.defaults.adapter = async (config) => response(config, 204, null);
   await disconnectApi();
   apiClient.defaults.adapter = originalAdapter;
 });
 
 describe("API session client", () => {
+  it.each([
+    ['attachment; filename="processed-sales.parquet"', "processed-sales.parquet"],
+    ["attachment; filename=processed-sales.parquet", "processed-sales.parquet"],
+    ['attachment; filename="processed-sales;2026.parquet"', "processed-sales;2026.parquet"],
+    ['attachment; filename="processed-vendas São Paulo.parquet"', "processed-vendas São Paulo.parquet"],
+    ["attachment; filename*=UTF-8''processed-vendas%20S%C3%A3o%20Paulo.parquet", "processed-vendas São Paulo.parquet"],
+    ['attachment; filename="fallback.parquet"; filename*=UTF-8\'pt-BR\'processed-vendas%20S%C3%A3o%20Paulo.parquet', "processed-vendas São Paulo.parquet"],
+    ["attachment; filename*=ISO-8859-1''processed-caf%E9.parquet", "processed-café.parquet"],
+    ['attachment; filename="fallback.parquet"; filename*=UTF-8\'\'%broken', "fallback.parquet"],
+    ['attachment; filename="../../processed-sales.parquet"', "processed-sales.parquet"],
+    ["attachment; filename*=UTF-8''%invalid", "processed-dataset.bin"],
+    [undefined, "processed-dataset.bin"],
+  ])("preserves the server export filename from %s", async (disposition, expectedFilename) => {
+    const blob = new Blob(["PAR1"], { type: "application/octet-stream" });
+    apiClient.defaults.adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.url).toBe("/datasets/7/export");
+      expect(config.responseType).toBe("blob");
+      return { ...response(config, 200, blob), headers: { "content-disposition": disposition } };
+    });
+
+    const result = await downloadDataset(7);
+    expect(result.blob).toBe(blob);
+    expect(result.filename).toBe(expectedFilename);
+  });
+
   it("sends the observed revision when undoing and surfaces conflicts", async () => {
     const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
       expect(config.url).toBe("/datasets/7/transformations/undo");
       expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
       const conflict = response(config, 409, { detail: "Dataset version changed." });
       throw new AxiosError("Dataset version changed.", "ERR_BAD_REQUEST", config, undefined, conflict);
     });
     apiClient.defaults.adapter = adapter;
-    await expect(undoDatasetTransformation(7, 8)).rejects.toThrow("Dataset version changed.");
+    await expect(undoDatasetTransformation(7, 8, "undo-revision-8")).rejects.toThrow("Dataset version changed.");
     expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays an undo with the same key and revision after an ambiguous response", async () => {
+    vi.useFakeTimers();
+    const receipt = { event_id: "audit-event", previous_version: 8, result_version: 9, status: "undone" };
+    let attempts = 0;
+    apiClient.defaults.adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
+      expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      attempts += 1;
+      if (attempts === 1) throw new AxiosError("Response lost", "ERR_NETWORK", config);
+      return response(config, 200, receipt);
+    });
+
+    const result = undoDatasetTransformation(7, 8, "undo-revision-8");
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual(receipt);
+    expect(attempts).toBe(2);
+  });
+
+  it("limits transient undo retries without changing its identity", async () => {
+    vi.useFakeTimers();
+    const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers.get("Idempotency-Key")).toBe("undo-revision-8");
+      expect(JSON.parse(String(config.data))).toEqual({ expected_version: 8 });
+      const unavailable = response(config, 503, { detail: "Service unavailable" });
+      throw new AxiosError("Service unavailable", "ERR_BAD_RESPONSE", config, undefined, unavailable);
+    });
+    apiClient.defaults.adapter = adapter;
+
+    const assertion = expect(undoDatasetTransformation(7, 8, "undo-revision-8")).rejects.toThrow("Service unavailable");
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(adapter).toHaveBeenCalledTimes(3);
   });
 
   it("uses the production API only for the explicitly trusted web host", () => {
@@ -295,5 +356,47 @@ describe("API session client", () => {
     await cancelJob(taskId, { retryNotFound: true });
 
     expect(attempts).toBe(2);
+  });
+});
+
+
+describe("governed dataset APIs", () => {
+  it("rejects unavailable or empty catalogs rather than inventing local live capabilities", async () => {
+    apiClient.defaults.adapter = async (config) => response(config, 200, []);
+    await expect(fetchOperationCatalog()).rejects.toThrow("invalid operation catalog");
+  });
+  it("submits explicitly chosen engines with typed scalar maps", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      expect(config.url).toBe("/datasets/7/transform");
+      expect(JSON.parse(String(config.data))).toEqual({ operation: "fill_nulls", parameters: { values: { id: "001", active: false } }, expected_version: 4, engine: "pandas" });
+      expect(config.headers.get("Idempotency-Key")).toBe("job-key");
+      return response(config, 202, { task_id: "job-key" });
+    };
+    await applyDatasetTransformation(7, "fill_nulls", { values: { id: "001", active: false } }, 4, "job-key", "pandas");
+  });
+  it("uses contract revision guards and durable evaluation identities", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      const data = JSON.parse(String(config.data));
+      if (config.url?.endsWith("/contracts")) {
+        expect(data).toEqual({ name: "Orders", rules: [{ id: "required", kind: "not_null", column: "id" }], expected_contract_version: 2 });
+        return response(config, 201, { id: 9, version: 3 });
+      }
+      expect(config.url).toBe("/datasets/7/quality/evaluations");
+      expect(data).toEqual({ contract_id: 9, expected_version: 4 });
+      expect(config.headers.get("Idempotency-Key")).toBe("quality-job");
+      expect(config.headers.get("X-Task-ID")).toBe("quality-job");
+      return response(config, 202, { task_id: "quality-job" });
+    };
+    await saveQualityContract(7, "Orders", [{ id: "required", kind: "not_null", column: "id" }], 2);
+    await startQualityEvaluation(7, 9, 4, "quality-job");
+  });
+  it("pins only the requested snapshot and leaves retention validation to the API", async () => {
+    apiClient.defaults.adapter = async (config) => {
+      expect(config.method).toBe("patch");
+      expect(config.url).toBe("/datasets/7/snapshots/snapshot-id");
+      expect(JSON.parse(String(config.data))).toEqual({ pinned: true });
+      return response(config, 200, { id: "snapshot-id", pinned: true });
+    };
+    expect(await pinDatasetSnapshot(7, "snapshot-id", true)).toEqual({ id: "snapshot-id", pinned: true });
   });
 });

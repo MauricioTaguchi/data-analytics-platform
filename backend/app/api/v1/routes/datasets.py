@@ -8,10 +8,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.cache import CacheService
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.dataset import Dataset
+from app.models.dataset_event import DatasetEvent
 from app.models.job import JobRecord
 from app.models.project import Project
 from app.models.report import Report
@@ -19,6 +19,7 @@ from app.models.transformation import Transformation
 from app.models.user import User
 from app.schemas.dataset import (
     DatasetProfileResponse,
+    DatasetEventResponse,
     DatasetResponse,
     DatasetUploadJobResponse,
     JobResponse,
@@ -27,7 +28,9 @@ from app.schemas.dataset import (
     TransformationRequest,
     TransformationResponse,
     UndoRequest,
+    UndoResponse,
 )
+from app.services.dataset_audit_service import DatasetAuditService
 from app.services.dataset_service import (
     DatasetExpansionLimitError,
     DatasetService,
@@ -40,6 +43,8 @@ from app.services.job_service import (
     TERMINAL_JOB_STATUSES,
 )
 from app.services.outbox_service import OutboxService
+from app.services.operations import operation_catalog, validate_operation_capability
+from app.services.engines import EngineCapabilityError
 from app.services.storage_service import (
     StorageCapacityError,
     UploadSizeLimitError,
@@ -55,6 +60,12 @@ from app.worker import celery_app
 
 router = APIRouter()
 logger = logging.getLogger("dataflow.jobs")
+
+
+@router.get("/operations")
+def list_operation_contracts(user: User = Depends(get_current_user)):
+    """Discover versioned parameter schemas and supported engine/input pairs."""
+    return operation_catalog()
 
 
 def resolve_task_id(requested_task_id: UUID | None) -> str:
@@ -113,7 +124,7 @@ def dispatch_or_defer(db: Session, task_id: str, task) -> None:
             logger.warning("Task %s remains in the transactional outbox for retry.", task_id)
     except Exception:
         # The domain state and outbox were committed before this best-effort
-        # fast path. Keep the accepted 202 response and let Celery Beat retry.
+        # fast path. Keep the accepted 202 response and let the scheduler retry.
         db.rollback()
         logger.exception("Immediate dispatch failed for task %s; the outbox will retry.", task_id)
 
@@ -383,12 +394,16 @@ def get_job_status(
         }
     job = JobService.owned(db, task_id, user.id)
     if not job:
+        archived = DatasetAuditService.archived_job(db, task_id, user.id)
+        if archived is not None:
+            return archived
         raise HTTPException(status_code=404, detail="Job not found.")
     return {
         "task_id": task_id,
         "status": job.status,
         "progress": job.progress,
         "stage": job.stage,
+        "correlation_id": job.correlation_id,
         "error_message": job.error_message,
         "result": job.result_json,
     }
@@ -493,6 +508,14 @@ def preview_transform(
         DatasetService.ensure_ready(dataset)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    engine_name = payload.engine or settings.TRANSFORMATION_ENGINE
+    try:
+        plan = validate_operation_capability(
+            payload.operation, payload.parameters,
+            engine_name=engine_name, input_path=Path(dataset.stored_path),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     task_id = resolve_task_id(requested_task_id)
     register_job(
         db,
@@ -500,7 +523,7 @@ def preview_transform(
         user.id,
         dataset_id,
         "transformation-preview",
-        task_args=[dataset_id, payload.operation, payload.parameters, payload.expected_version],
+        task_args=[dataset_id, payload.operation, payload.parameters, payload.expected_version, engine_name, plan.operation_version],
     )
     db.commit()
     dispatch_or_defer(db, task_id, preview_transformation_task)
@@ -532,7 +555,11 @@ def transform_dataset(
             user.id,
             payload.expected_version,
             idempotency_key,
+            engine_name=payload.engine,
         )
+    except EngineCapabilityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (ValueError, KeyError, TypeError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -582,19 +609,38 @@ def transformation_history(
     )
 
 
-@router.post("/{dataset_id}/transformations/undo", response_model=TransformationResponse)
+@router.get("/{dataset_id}/events", response_model=list[DatasetEventResponse])
+def dataset_events(
+    dataset_id: int,
+    after_version: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    owned_dataset(db, dataset_id, user.id)
+    return (
+        db.query(DatasetEvent)
+        .filter(DatasetEvent.dataset_id == dataset_id, DatasetEvent.result_version > after_version)
+        .order_by(DatasetEvent.result_version)
+        .limit(limit)
+        .all()
+    )
+
+
+@router.post("/{dataset_id}/transformations/undo", response_model=UndoResponse)
 def undo_transformation(
     dataset_id: int,
     payload: UndoRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     dataset = owned_dataset(db, dataset_id, user.id)
     try:
         item = DatasetService.undo_last(
-            db, dataset, user.id, expected_version=payload.expected_version
+            db, dataset, user.id, expected_version=payload.expected_version,
+            idempotency_key=idempotency_key,
         )
-        CacheService.delete(f"dataset:{dataset.id}:profile")
         return item
     except ValueError as exc:
         db.rollback()

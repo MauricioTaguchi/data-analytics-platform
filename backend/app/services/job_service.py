@@ -7,6 +7,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.telemetry import correlation_id
 from app.models.job import JobRecord
 from app.models.user import User
 
@@ -92,7 +93,7 @@ class JobService:
     @staticmethod
     def ensure_result_size(result: dict, *, label: str = "Job result") -> None:
         serialized_size = len(
-            json.dumps(result, ensure_ascii=True, default=str).encode("utf-8")
+            json.dumps(result, ensure_ascii=True, default=str, allow_nan=False).encode("utf-8")
         )
         result_limit = settings.MAX_JOB_RESULT_SIZE_MB * 1024 * 1024
         if serialized_size > result_limit:
@@ -157,6 +158,7 @@ class JobService:
             report_id=report_id,
             transformation_id=transformation_id,
             kind=kind,
+            correlation_id=correlation_id() or task_id,
             status="PENDING",
             progress=0,
             stage="dispatch_pending",
@@ -463,7 +465,32 @@ class JobService:
             },
             synchronize_session=False,
         )
+        if updated == 1:
+            JobService._complete_quality_evaluation(db, task_id, status="error", now=now)
         return updated == 1
+
+    @staticmethod
+    def _complete_quality_evaluation(db: Session, task_id: str, *, status: str, now: datetime) -> None:
+        """Persist domain termination in the same transaction as the fenced job.
+
+        Cancellation and exhausted retries can finish without a worker callback.
+        Evaluation evidence must remain terminal after job history is removed.
+        """
+        from app.models.quality_evaluation import QualityEvaluation
+
+        db.query(QualityEvaluation).filter(
+            QualityEvaluation.task_id == task_id,
+            QualityEvaluation.status.in_(("pending", "running")),
+        ).update({
+            QualityEvaluation.status: status,
+            QualityEvaluation.passed: None,
+            QualityEvaluation.result_json: None,
+            QualityEvaluation.error_message: (
+                "Quality evaluation did not complete. Check execution status before retrying."
+                if status == "error" else None
+            ),
+            QualityEvaluation.completed_at: now,
+        }, synchronize_session="fetch")
 
     @staticmethod
     def request_cancellation(db: Session, job: JobRecord) -> bool:
@@ -514,6 +541,8 @@ class JobService:
                 synchronize_session=False,
             )
         )
+        if updated == 1:
+            JobService._complete_quality_evaluation(db, task_id, status="cancelled", now=now)
         return updated == 1
 
     @staticmethod
@@ -553,4 +582,6 @@ class JobService:
             },
             synchronize_session=False,
         )
+        if updated == 1:
+            JobService._complete_quality_evaluation(db, task_id, status="cancelled", now=now)
         return updated == 1

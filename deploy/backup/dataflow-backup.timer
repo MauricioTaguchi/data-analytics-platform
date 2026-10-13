@@ -1,0 +1,11 @@
+[Unit]
+Description=DataFlow daily maintenance backup schedule
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+AccuracySec=1min
+Persistent=false
+Unit=dataflow-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -12,7 +12,6 @@ from app.models.project import Project
 from app.models.report import Report
 from app.models.transformation import Transformation
 from app.models.user import User
-from app.services.dataset_service import DatasetService
 from app.services.job_service import (
     JobCancellationRequested,
     JobLeaseUnavailable,
@@ -120,7 +119,7 @@ def test_profile_failure_restores_the_dataset_to_ready(monkeypatch):
     def fail_profile(*_args, **_kwargs):
         raise ValueError("The profile could not be generated.")
 
-    monkeypatch.setattr(DatasetService, "build_profile", fail_profile)
+    monkeypatch.setattr("app.tasks.dataset_tasks.run_profile", fail_profile)
 
     result = profile_dataset_task.apply(
         args=[dataset_id],

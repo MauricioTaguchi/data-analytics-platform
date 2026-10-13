@@ -1,44 +1,40 @@
 # Known limitations
 
-DataFlow is a production-minded portfolio/reference implementation. The controls in the repository are real and tested where stated, but they do not by themselves make every deployment production-ready.
+DataFlow is a production-minded portfolio/reference implementation. Implemented controls and reproducible test procedures do not make every deployment production-ready. Check the workflow result for the exact revision under review; this document does not claim that an unvalidated change passed CI.
 
 ## Scale and availability
 
-- Dataset processing uses Pandas in a bounded Celery worker and is designed for portfolio-scale, single-node memory limits.
-- The included Render topology runs the API, worker, and scheduler in one service so they can share one persistent disk. It is not highly available.
-- Local versioned storage is not safe for multiple independent API or worker replicas. An S3-compatible adapter is required before horizontal scaling.
-- Local account quotas are calculated from database-tracked artifacts and the free-disk check is admission control, not a filesystem reservation. PostgreSQL serializes the short final artifact-admission step and rejects a concurrent output that no longer fits; an object-storage implementation still needs atomic provider-side quota accounting.
-- Multipart request bytes are bounded as they enter parsing and concurrent upload receives are capped per API process. Each accepted request can still create one bounded Starlette spool before authentication dependencies and route code execute. The cap is not cluster-wide: every additional API worker or replica adds its own slots, and slow-client protection still depends on reverse-proxy/server body and timeout limits.
-- The non-upload body guard counts bytes only when an endpoint consumes its request stream. `Content-Length` is always checked for body-bearing methods, but rejecting slow, unread, or indefinitely streamed bodies still requires ASGI-server and edge timeouts.
-- Chart aggregation is synchronous and bounded by the configured dataset limits.
+- Dataset processing remains bounded, single-node work. Pandas inspection, profiling, preview, quality evaluation and transformations execute in supervised subprocesses; their frames are still materialized in memory. Native Polars/DuckDB projections do not turn every operation into distributed or streaming computation.
+- RSS, spill and deadlines are supervised, with child termination on cancellation or lease loss. RSS/spill sampling can miss short peaks. Container/cgroup memory, CPU and disk limits remain necessary for aggregate enforcement; Celery's memory-per-child setting recycles workers after tasks.
+- Compose separates interactive preview/report work from bulk import/profile/transformation/quality work. The included Render topology consumes both queues in one worker and shares one persistent disk with the API and scheduler. It is not highly available.
+- Runtime data uses local versioned paths, rename and fsync. Independent replicas need a shared-storage redesign. The optional S3 destination stores verified backup archives; it does not supply runtime object storage, signed dataset downloads or horizontal storage coordination.
+- Eligible Parquet charts use bounded DuckDB aggregation and a bounded cache keyed by tenant, revision, file identity and chart configuration. Some types and histograms fall back to projected Pandas processing; non-Parquet sources still require eager reads. Queries are synchronous and admission/cache limits are per API process. DuckDB's buffer limit and interrupt deadline are not a hard total-process memory guarantee.
+- Local quotas scan database-tracked artifact paths. Free-disk checks are admission controls, not filesystem reservations. PostgreSQL serializes final account admission; incremental quota accounting and provider-side reservations remain future work.
+- Upload body size and receive slots are bounded per API process. Starlette can create one bounded multipart spool before route authentication. Slow clients, unused request streams and aggregate connection limits require reverse-proxy/ASGI timeouts; adding API processes adds receive slots.
+- [Benchmarks](BENCHMARKS.md) describe a reproducible workload and its environment. A reference run is not a production capacity, concurrency or Big Data claim.
 
 ## Durability and recovery
 
-- The repository does not provision automated database backups, object replication, cross-region recovery, or restore drills.
-- Transformation undo restores a prior dataset pointer; it is not a substitute for infrastructure backup and disaster recovery.
-- Recovery objectives such as RPO and RTO are intentionally unspecified until a deployment platform, backup policy, and restore test exist.
+- New snapshot manifests record origin-time size and SHA-256; undo compares actual bytes outside locks and fences publication afterward. Legacy files have no trustworthy original digest and remain explicitly unverified. Filesystem/database administrators can bypass these controls.
+- Retention is disabled by default. When enabled it preserves active, pinned, recent and in-flight snapshots, expires eligible history, and collects bytes separately. Expired history cannot be restored by undo; immutable audit metadata remains. Legacy files are excluded from automatic expiration.
+- PostgreSQL triggers and reviewed runtime-role grants restrict direct audit mutation and snapshot identity changes. Owners/superusers can disable triggers. This is not a cryptographically chained or administrator-proof audit store.
+- Backup creation, checksum verification and an isolated restore procedure are implemented. Operators must schedule them, provision an independent encrypted destination, test recovery in their deployment and retain evidence. The repository does not provision managed backups, replication, cross-region recovery or continuous archival.
+- Undo is not infrastructure disaster recovery. RPO/RTO require an actual backup schedule and timed restore of the selected production deployment; they are not inferred from unit tests or a local drill.
 
 ## Observability
 
-- The API emits structured request logs and returns request IDs; health endpoints expose liveness and dependency readiness.
-- API readiness checks PostgreSQL and cache availability, but does not verify worker consumption or storage writability.
-- The repository does not yet export metrics or distributed traces, define alert routing, retain centralized logs, or publish formal SLOs.
-- Worker progress is visible in the application, but queue-depth and saturation alerts require platform-level monitoring.
+- Structured logs and correlation IDs connect HTTP admission, outbox delivery, worker execution and retained results. Protected `/api/v1/operations/processing` and `/api/v1/operations/metrics` expose queue age, outbox lag, retained-job aggregates, process heartbeats and local storage observations when a metrics token is configured.
+- Correlation IDs are not full OpenTelemetry traces. Process heartbeats do not prove task consumption or end-to-end success. Retained-job gauges and recent-duration samples are not lifetime counters or SLO histograms.
+- Readiness checks PostgreSQL/cache; operational observations are deliberately separate from liveness/restart decisions. Central scraping, log retention, alert routing, incident ownership and formal SLOs must be deployed externally.
 
-## Security and compliance
+## Security and product scope
 
-- The implementation includes tenant checks, rotating refresh sessions, upload limits, security headers, Redis-backed authentication rate limiting, dependency checks, and static analysis.
-- It has not undergone an independent penetration test or formal compliance assessment.
-- Production deployments still require TLS enforcement, a managed secret store, encrypted object storage, malware scanning, retention rules, edge protection, and periodic access review.
-- The browser client keeps bearer and refresh tokens in JavaScript memory; deployments with stricter threat models should evaluate secure, same-site, HTTP-only cookies together with CSRF controls.
-- GitHub Actions are pinned to reviewed full commit SHAs, but the Python, Node, Nginx, PostgreSQL, and Redis container references still use human-readable tags. Immutable multi-architecture image digests were not added without verifying them against the target registries and deployment architectures; release owners must resolve, review, and record those digests before treating container builds as reproducible artifacts.
+- Tenant checks, rotating refresh sessions, resource limits, headers, Redis-backed rate limits, dependency checks and static analysis are implemented. No independent penetration test or compliance certification is claimed.
+- Production requires TLS, secret management, least-privilege roles, encryption, malware scanning, backup access controls and periodic reviews. Runtime database-role separation is an explicit deployment step; the development Compose database owner is not a restricted application account.
+- Browser bearer/refresh tokens stay in JavaScript memory. Stricter deployments should evaluate HTTP-only, same-site cookies and the corresponding CSRF model.
+- Quality contracts are explicit advisory evaluations, not automatic gates blocking transformations. Scheduling checks, alerting on failed rules and a governed semantic layer remain outside the current feature.
+- Demo changes are non-persistent; live workers, tenant controls, quality evidence and storage recovery require the backend. Preview indicators describe sampled rows, not the full dataset.
+- ESLint and the coverage provider are now resolved in the frontend lockfile. The frontend coverage gate still targets shared data utilities rather than the entire UI. Visual/accessibility coverage and physical-device testing remain incomplete.
+- GitHub Actions are pinned to reviewed commit SHAs; container references still use tags. Release owners must resolve registry-verified, architecture-appropriate image digests before claiming immutable container builds.
 
-## Product scope
-
-- The local demo is intentionally non-persistent and cannot prove worker, database, Redis, or authorization behavior.
-- PDF reports and dashboards are portfolio deliverables, not a governed business-intelligence semantic layer.
-- The enforced frontend coverage threshold currently targets shared data utilities, not the entire component and hook surface.
-- Frontend lint and coverage tools are installed at exact versions in the disposable CI workspace, but they are not yet represented in the application lockfile and therefore still require registry availability.
-- Accessibility and visual regression coverage are not yet comprehensive.
-
-See [Operations and observability](OPERATIONS.md) for deployment checks and [Security model](SECURITY.md) for implemented controls.
+See [Operations](OPERATIONS.md), [Snapshot integrity](SNAPSHOT_INTEGRITY.md), [Disaster recovery](DISASTER_RECOVERY.md) and [Security](SECURITY.md).

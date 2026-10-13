@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createChart, createDashboard, describeApiError, fetchChartData, isRequestCancelled, listCharts, listDashboards, type Aggregation, type Chart, type ChartData, type ChartType, type Dashboard } from "../api-client";
 import type { DataRow } from "../data-utils";
 
@@ -168,6 +168,7 @@ export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; ty
 }
 
 export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, externalBusy, onNotice, onBusyChange }: Props) {
+  const fieldId = useId();
   const [dashboards, setDashboards] = useState<Dashboard[]>([]);
   const [charts, setCharts] = useState<Chart[]>([]);
   const [data, setData] = useState<ChartData | null>(null);
@@ -309,10 +310,10 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
   }
 
   return <section className="dashboard-layout"><article className="panel chart-config"><div className="panel-header"><div><h2>Dashboard builder</h2><p>Turn transformed datasets into decision-ready visualizations</p></div><span className={live ? "status-pill success" : "status-pill"}>{live ? "Persisted" : "Demo"}</span></div>
-    <div className="config-body"><label>Dimension<select value={activeXColumn} onChange={(event) => setXColumn(event.target.value)}>{columns.map((column) => <option key={column}>{column}</option>)}</select></label>
-      <label>Measure<select value={activeYColumn} onChange={(event) => setYColumn(event.target.value)}>{(numericColumns.length ? numericColumns : columns).map((column) => <option key={column}>{column}</option>)}</select></label>
-      <label>Aggregation<select value={aggregation} onChange={(event) => setAggregation(event.target.value as Aggregation)}>{["sum", "mean", "count", "min", "max"].map((item) => <option key={item}>{item}</option>)}</select></label>
-      <label>Chart type<select value={chartType} onChange={(event) => setChartType(event.target.value as ChartType)}><option value="bar">Bar</option><option value="line">Line</option><option value="pie">Pie</option><option value="scatter">Scatter</option><option value="histogram">Histogram</option><option value="kpi">KPI</option><option value="table">Table</option></select></label>
+    <div className="config-body"><label><span id={`${fieldId}-dimension`}>Dimension</span><select aria-labelledby={`${fieldId}-dimension`} value={activeXColumn} onChange={(event) => setXColumn(event.target.value)}>{columns.map((column) => <option key={column}>{column}</option>)}</select></label>
+      <label><span id={`${fieldId}-measure`}>Measure</span><select aria-labelledby={`${fieldId}-measure`} value={activeYColumn} onChange={(event) => setYColumn(event.target.value)}>{(numericColumns.length ? numericColumns : columns).map((column) => <option key={column}>{column}</option>)}</select></label>
+      <label><span id={`${fieldId}-aggregation`}>Aggregation</span><select aria-labelledby={`${fieldId}-aggregation`} value={aggregation} onChange={(event) => setAggregation(event.target.value as Aggregation)}>{["sum", "mean", "count", "min", "max"].map((item) => <option key={item}>{item}</option>)}</select></label>
+      <label><span id={`${fieldId}-chart-type`}>Chart type</span><select aria-labelledby={`${fieldId}-chart-type`} value={chartType} onChange={(event) => setChartType(event.target.value as ChartType)}><option value="bar">Bar</option><option value="line">Line</option><option value="pie">Pie</option><option value="scatter">Scatter</option><option value="histogram">Histogram</option><option value="kpi">KPI</option><option value="table">Table</option></select></label>
       <button className="primary" disabled={busy || externalBusy || !rows.length} onClick={buildChart}>{busy ? "Building…" : "Build chart"}</button></div>
     {dashboards.length ? <div className="saved-items"><strong>Saved dashboards</strong>{dashboards.map((dashboard) => <button key={dashboard.id} disabled={busy || externalBusy} aria-pressed={dashboard.id === selectedDashboardId} onClick={() => selectDashboard(dashboard)}>{dashboard.name}</button>)}</div> : null}
   </article><article className="panel chart-canvas"><div className="panel-header"><div><h2>{visualTitle || `${aggregation} of ${activeYColumn} by ${activeXColumn}`}</h2><p>{data?.labels.length || data?.rows.length || 0} records visualized</p></div></div><ChartVisual data={data} type={chartType} />

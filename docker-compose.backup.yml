@@ -1,0 +1,29 @@
+# Opt-in recovery runner. This overlay never starts or stops application services.
+services:
+  recovery:
+    profiles: [recovery]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.recovery
+    init: true
+    restart: "no"
+    env_file: [./backend/.env]
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - BACKUP_KMS_KEY_ID
+    volumes:
+      - analytics_uploads:/app/data/uploads:ro
+      - analytics_reports:/app/data/reports:ro
+      - ${DATAFLOW_BACKUP_DIR:?Set a private absolute backup directory}:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128

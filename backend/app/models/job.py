@@ -19,6 +19,7 @@ class JobRecord(Base):
     report_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("reports.id"), nullable=True, index=True)
     transformation_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("transformations.id"), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING", server_default="PENDING")
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     stage: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -42,7 +43,7 @@ class JobRecord(Base):
     __table_args__ = (
         CheckConstraint("progress >= 0 AND progress <= 100", name="ck_job_records_progress"),
         CheckConstraint(
-            "kind IN ('import', 'profile', 'transformation-preview', 'transformation', 'report')",
+            "kind IN ('import', 'profile', 'transformation-preview', 'transformation', 'report', 'quality-evaluation')",
             name="ck_job_records_kind",
         ),
         CheckConstraint(

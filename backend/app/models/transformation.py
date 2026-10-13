@@ -24,6 +24,7 @@ class Transformation(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     dataset_id: Mapped[int] = mapped_column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
     operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    operation_version: Mapped[str] = mapped_column(String(30), nullable=False, default="1.0.0", server_default="1.0.0")
     engine_name: Mapped[str] = mapped_column(String(20), nullable=False, default="pandas", server_default="pandas")
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)

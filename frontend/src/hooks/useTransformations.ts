@@ -1,19 +1,50 @@
 import { useCallback, useEffect, useState } from "react";
-import { applyDatasetTransformation, fetchTransformationHistory, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, undoDatasetTransformation, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
-import { applyLocalOperation, buildApiParameters, type DataOperation, type DataRow } from "../data-utils";
+import { applyDatasetTransformation, fetchTransformationHistory, fetchOperationCatalog, describeApiError, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
+import { calculateQuality, type DataRow } from "../data-utils";
+import { applyLocalParameters, buildOperationParameters, DEMO_OPERATIONS, emptyOperationDraft, type OperationDefinition } from "../operation-contracts";
+import { createUndoCoordinator } from "./undo-intent";
 
 type TrackJob = (taskId: string, label: string) => Promise<JobStatus>;
 
-export function useTransformations(dataset: Dataset | null, rows: DataRow[], setRows: (rows: DataRow[]) => void, refresh: () => Promise<void>, track: TrackJob) {
-  const [operation, setOperation] = useState<DataOperation>("drop_duplicates");
-  const [column, setColumn] = useState("");
-  const [value, setValue] = useState("");
+export function useTransformations(dataset: Dataset | null, rows: DataRow[], setRows: (rows: DataRow[]) => void, refresh: () => Promise<void>, track: TrackJob, schemaColumns?: string[], live = Boolean(dataset)) {
+  const [operation, setOperation] = useState("drop_duplicates");
+  const [draft, setDraft] = useState(emptyOperationDraft);
+  const [engine, setEngine] = useState("pandas");
+  const [remoteCatalog, setRemoteCatalog] = useState<{ datasetId: number | null; operations: OperationDefinition[] } | null>(null);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogAttempt, setCatalogAttempt] = useState(0);
   const [preview, setPreview] = useState<TransformationPreview | null>(null);
   const [history, setHistory] = useState<TransformationResult[]>([]);
   const [localSnapshots, setLocalSnapshots] = useState<DataRow[][]>([]);
-  const columns = Object.keys(rows[0] || {});
-  const activeColumn = columns.includes(column) ? column : columns[0] || "";
+  const [undoCoordinator] = useState(createUndoCoordinator);
+  const [undoNeedsRecovery, setUndoNeedsRecovery] = useState(false);
+  const columns = schemaColumns || Object.keys(rows[0] || {});
   const datasetId = dataset?.id ?? null;
+  const catalog = live ? remoteCatalog?.datasetId === datasetId ? remoteCatalog.operations : [] : DEMO_OPERATIONS;
+  const definition = catalog.find((item) => item.operation === operation) || catalog[0];
+  const selectedEngine = definition?.engines[engine] ? engine : Object.keys(definition?.engines || {})[0];
+  useEffect(() => {
+    setPreview(null);
+    setDraft(emptyOperationDraft());
+    if (!live) { setRemoteCatalog(null); setCatalogError(""); return; }
+    const controller = new AbortController();
+    setCatalogError("");
+    setRemoteCatalog(null);
+    void fetchOperationCatalog(controller.signal).then((operations) => {
+      if (!controller.signal.aborted) setRemoteCatalog({ datasetId, operations });
+    }).catch((error) => {
+      if (!controller.signal.aborted && !isRequestCancelled(error)) setCatalogError(describeApiError(error));
+    });
+    return () => controller.abort();
+  }, [datasetId, catalogAttempt, live]);
+
+  function parameters() {
+    if (!definition) throw new Error("The operation catalog is unavailable. Retry loading it before running a transformation.");
+    return buildOperationParameters(definition, draft, columns);
+  }
+
+  function changeOperation(next: string) { setOperation(next); setDraft(emptyOperationDraft()); setPreview(null); }
+
 
   const loadHistory = useCallback(async (signal?: AbortSignal) => {
     if (!datasetId) { setHistory([]); return; }
@@ -29,11 +60,13 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }, [loadHistory]);
 
   async function previewOperation() {
+    if (live && !dataset) throw new Error("Upload a dataset before running a persistent transformation.");
+    const payload = parameters();
     if (dataset) {
       const taskId = crypto.randomUUID();
       let trackingId: string = taskId;
       try {
-        const queued = await previewDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
+        const queued = await previewDatasetTransformation(dataset.id, definition!.operation, payload, dataset.version, taskId, selectedEngine);
         trackingId = queued.task_id;
       } catch (error) {
         if (!isAmbiguousJobCreationError(error)) throw error;
@@ -45,17 +78,23 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
       if (!result?.before || !result?.after) throw new Error("The transformation preview returned an invalid result.");
       setPreview(result); return result;
     }
-    const next = applyLocalOperation(rows, operation, { column: activeColumn, value });
-    const result = { before: { rows: rows.length, columns: columns.length, missing_cells: 0 }, after: { rows: next.length, columns: Object.keys(next[0] || {}).length, missing_cells: 0 }, rows: next };
+    const next = applyLocalParameters(rows, definition!.operation, payload);
+    const result = {
+      before: { rows: rows.length, columns: columns.length, missing_cells: calculateQuality(rows).missingCount },
+      after: { rows: next.length, columns: Object.keys(next[0] || {}).length, missing_cells: calculateQuality(next).missingCount },
+      rows: next,
+    };
     setPreview(result); return result;
   }
 
   async function applyOperation() {
+    if (live && !dataset) throw new Error("Upload a dataset before running a persistent transformation.");
+    const payload = parameters();
     if (dataset) {
       const taskId = crypto.randomUUID();
       let trackingId: string = taskId;
       try {
-        const queued = await applyDatasetTransformation(dataset.id, operation, buildApiParameters(operation, { column: activeColumn, value }), dataset.version, taskId);
+        const queued = await applyDatasetTransformation(dataset.id, definition!.operation, payload, dataset.version, taskId, selectedEngine);
         trackingId = queued.task_id;
       } catch (error) {
         if (!isAmbiguousJobCreationError(error)) throw error;
@@ -65,10 +104,10 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
       await track(trackingId, "Dataset transformation");
       await refresh(); await loadHistory(); setPreview(null); return;
     }
-    const nextRows = applyLocalOperation(rows, operation, { column: activeColumn, value });
+    const nextRows = applyLocalParameters(rows, definition!.operation, payload);
     setLocalSnapshots((items) => [...items, rows.map((row) => ({ ...row }))]);
     setHistory((items) => [{
-      id: Date.now(), operation, parameters: buildApiParameters(operation, { column: activeColumn, value }), status: "completed",
+      id: Date.now(), operation: definition!.operation, operation_version: definition!.semantic_version, parameters: payload, status: "completed",
       task_id: null, expected_version: items.length + 1, before_rows: rows.length, after_rows: nextRows.length,
       before_columns: columns.length, after_columns: Object.keys(nextRows[0] || {}).length, undone_at: null,
       created_at: new Date().toISOString(),
@@ -78,10 +117,18 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
 
   async function undo() {
     if (dataset) {
-      await undoDatasetTransformation(dataset.id, dataset.version);
-      setPreview(null);
-      await refresh();
-      await loadHistory();
+      try {
+        await undoCoordinator.run(dataset, async () => {
+          setPreview(null);
+          const results = await Promise.allSettled([refresh(), loadHistory()]);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        });
+        setUndoNeedsRecovery(false);
+      } catch (error) {
+        setUndoNeedsRecovery(undoCoordinator.needsRecovery(dataset.id));
+        throw error;
+      }
       return;
     }
     const previous = localSnapshots[localSnapshots.length - 1];
@@ -93,10 +140,13 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   const reset = useCallback(() => {
+    undoCoordinator.reset();
+    setDraft(emptyOperationDraft());
+    setUndoNeedsRecovery(false);
     setPreview(null);
     setHistory([]);
     setLocalSnapshots([]);
-  }, []);
+  }, [undoCoordinator]);
 
-  return { operation, setOperation, column: activeColumn, setColumn, value, setValue, preview, history, localSnapshots, previewOperation, applyOperation, undo, loadHistory, reset };
+  return { operation: definition?.operation || operation, setOperation: changeOperation, draft, setDraft: (next: typeof draft) => { setDraft(next); setPreview(null); }, engine: selectedEngine, setEngine: (next: string) => { setEngine(next); setPreview(null); }, catalog, catalogError, retryCatalog: () => setCatalogAttempt((attempt) => attempt + 1), preview, history, localSnapshots, previewOperation, applyOperation, undo, undoNeedsRecovery, loadHistory, reset };
 }

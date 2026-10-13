@@ -17,19 +17,26 @@
 - Celery jobs bind metadata to the initiating user before exposing status or cancellation.
 - Third-party GitHub Actions are pinned to full commit SHAs with their reviewed release tags documented inline; Dependabot monitors Actions, both Dockerfiles, and the root Compose manifest.
 
+- New snapshots have immutable origin-time digest/size manifests; undo rejects corrupted or expired targets before mutating the head. Legacy history is explicitly unverified.
+- PostgreSQL triggers reject direct audit-event mutation and changes to snapshot identity. Reviewed runtime-role grants limit retention updates to their intended columns. Database owners/superusers remain capable of bypassing these controls.
+- Quality contracts/evaluations and snapshot pinning enforce dataset ownership. Evaluation results contain bounded rule evidence, not failing raw-row samples. Quality failures are advisory, not an automatic access or publication gate.
+- Chart filters reject unknown columns/operators and invalid typed values. Generated queries quote identifiers and bind values; no user SQL, extensions or UDFs are accepted.
+- Operational metrics require a separately configured bearer token and are disabled when it is absent. Endpoint results expose bounded aggregates rather than per-user data. Keep this token out of browser configuration and client bundles.
+- Frontend ESLint/coverage dependencies are resolved in the frozen lockfile. Correlation fields are metadata for diagnosis, not authorization credentials.
+
 ## Deployment security checklist
 
 - Set a unique high-entropy `SECRET_KEY`; never use the example value.
 - Terminate TLS at the platform edge and mark authentication cookies secure if cookies are adopted.
-- Use private encrypted object storage, malware scanning, retention rules, and signed URLs.
+- Protect local dataset/report volumes with access controls and encryption. Use private encrypted backup destinations and malware scanning; runtime object storage and signed dataset URLs require further implementation. Review pins and history requirements before enabling retention.
 - Add an edge rate limiter in front of Redis-backed application limits for defense in depth.
 - Restrict CORS to the deployed frontend origin.
 - Use a managed secrets store and rotate database, Redis, and JWT secrets.
-- Keep managed PostgreSQL and Redis services on private network paths with public ingress disabled.
+- Keep managed PostgreSQL and Redis services on private network paths with public ingress disabled. Use a non-owner API/worker role and separate migration credentials; review `backend/scripts/restrict_runtime_role.sql` after schema changes.
 - Review CodeQL, dependency audit, dependency review, and Dependabot alerts before release.
 - Resolve container tags to registry-verified, architecture-appropriate immutable digests and record their provenance before a production release; the repository intentionally does not claim unverified digests.
-- Centralize structured audit logs and alert on repeated authentication failures.
-- Define backup access, retention, restoration tests, and incident ownership for the selected platform.
+- Centralize structured request/worker logs and retained audit evidence; configure a protected metrics scraper and alert delivery. Correlation IDs do not constitute a full OpenTelemetry trace or tamper-proof audit export.
+- Define backup access, retention, restoration tests, and incident ownership for the selected platform. Run the supplied backup verification/isolated restore procedure before accepting recovery objectives; verify S3 bucket versioning and encryption if using the archive destination.
 
 These controls are production-minded safeguards, not a certification or independent security assessment. See [Known limitations](LIMITATIONS.md).
 

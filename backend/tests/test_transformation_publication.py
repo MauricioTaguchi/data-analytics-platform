@@ -169,9 +169,17 @@ def test_stale_attempt_cannot_publish_or_remove_replacement_output(tmp_path):
     winner = {"path": None}
 
     def checkpoint():
-        if winner["path"] is not None or not list(prepared.prepared_path.parent.glob(".*.part.csv")):
+        if winner["path"] is not None:
             return
-        # The old attempt finished serialization and then lost its lease.
+        # Observe only this attempt's durable reservation. Other tests/workers
+        # can legitimately have temporary artifacts in the same storage root.
+        with SessionLocal() as observer:
+            artifact = observer.query(StorageArtifact).filter_by(
+                task_id=prepared.task_id, attempt_token="stale-attempt",
+            ).first()
+            if artifact is None or not Path(artifact.temporary_path).is_file():
+                return
+        # The old attempt produced output bytes and then lost its lease.
         # Its replacement uses the same logical operation and distinct bytes.
         with SessionLocal() as replacement:
             job = replacement.get(JobRecord, prepared.task_id)

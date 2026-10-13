@@ -3,6 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.validation import bounded_json
+from app.services.chart_filters import validate_filter_structure
 
 class DashboardCreate(BaseModel):
     project_id: int = Field(ge=1)
@@ -32,7 +33,7 @@ class ChartCreate(BaseModel):
     @field_validator("filters_json")
     @classmethod
     def validate_filters_size(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return bounded_json(value, max_bytes=20_000, label="Chart filters")
+        return validate_filter_structure(bounded_json(value, max_bytes=20_000, label="Chart filters"))
 
 class ChartResponse(ChartCreate):
     id: int

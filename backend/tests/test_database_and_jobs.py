@@ -436,7 +436,9 @@ def test_worker_dispatch_failure_remains_durable_for_outbox_retry(
         db.refresh(job)
         assert event.status == "PUBLISHED"
         assert job.stage == "queued"
-        assert dispatched == [{"args": [job.dataset_id], "task_id": task_id}]
+        assert dispatched == [{"args": [job.dataset_id], "task_id": task_id,
+                               "headers": {"correlation_id": uploaded.headers["X-Request-ID"]}}]
+        assert job.correlation_id == uploaded.headers["X-Request-ID"]
     finally:
         db.close()
 

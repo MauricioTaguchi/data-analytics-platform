@@ -9,7 +9,6 @@ from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.project import Project
 from app.models.user import User
-from app.services.dataset_service import DatasetService
 from app.services.job_service import JobService
 from app.services.outbox_service import OutboxService
 from app.tasks.dataset_tasks import profile_dataset_task
@@ -41,7 +40,7 @@ def _dataset(*, profile_job: bool = True, status: str = "profiling") -> tuple[in
 def test_profile_cannot_publish_after_its_snapshot_changes(monkeypatch, mutation):
     _, dataset_id, task_id = _dataset()
 
-    def build_old_profile(_snapshot):
+    def build_old_profile(_snapshot, *_args, **_kwargs):
         with SessionLocal() as concurrent:
             dataset = concurrent.get(Dataset, dataset_id)
             if mutation == "revision":
@@ -52,7 +51,7 @@ def test_profile_cannot_publish_after_its_snapshot_changes(monkeypatch, mutation
             concurrent.commit()
         return {"rows": 2, "source": "old"}
 
-    monkeypatch.setattr(DatasetService, "build_profile", build_old_profile)
+    monkeypatch.setattr("app.tasks.dataset_tasks.run_profile", build_old_profile)
     outcome = profile_dataset_task.apply(args=[dataset_id], task_id=task_id, throw=False)
 
     assert outcome.failed()
@@ -67,7 +66,7 @@ def test_profile_cannot_publish_after_its_snapshot_changes(monkeypatch, mutation
 
 def test_profile_rejects_a_busy_dataset_without_losing_its_acquisition(monkeypatch):
     _, dataset_id, task_id = _dataset(status="transforming")
-    monkeypatch.setattr(DatasetService, "build_profile", lambda _: pytest.fail("Must not parse a busy dataset"))
+    monkeypatch.setattr("app.tasks.dataset_tasks.run_profile", lambda *_args, **_kwargs: pytest.fail("Must not parse a busy dataset"))
 
     outcome = profile_dataset_task.apply(args=[dataset_id], task_id=task_id, throw=False)
 
@@ -82,7 +81,7 @@ def test_profile_rejects_a_busy_dataset_without_losing_its_acquisition(monkeypat
 def test_profile_success_does_not_repopulate_an_unversioned_cache(monkeypatch):
     _, dataset_id, task_id = _dataset()
     profile = {"rows": 2, "source": "current"}
-    monkeypatch.setattr(DatasetService, "build_profile", lambda _: profile)
+    monkeypatch.setattr("app.tasks.dataset_tasks.run_profile", lambda *_args, **_kwargs: profile)
     monkeypatch.setattr(CacheService, "set_json", lambda *_args, **_kwargs: pytest.fail("Unversioned cache write"))
 
     outcome = profile_dataset_task.apply(args=[dataset_id], task_id=task_id, throw=False)

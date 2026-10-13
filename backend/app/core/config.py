@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     OUTBOX_MAX_RETRY_SECONDS: int = Field(default=300, ge=10, le=3_600)
     JOB_RETENTION_DAYS: int = Field(default=30, ge=1, le=3_650)
     JOB_RETENTION_BATCH_SIZE: int = Field(default=1_000, ge=1, le=10_000)
+    SNAPSHOT_RETENTION_DAYS: int = Field(default=0, ge=0, le=3_650)
+    SNAPSHOT_RETENTION_KEEP_LAST: int = Field(default=5, ge=1, le=1_000)
+    DASHBOARD_QUERY_THREADS: int = Field(default=1, ge=1, le=8)
+    DASHBOARD_QUERY_MEMORY_MB: int = Field(default=128, ge=32)
+    DASHBOARD_QUERY_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=120)
+    DASHBOARD_QUERY_MAX_CONCURRENT: int = Field(default=2, ge=1, le=32)
+    DASHBOARD_CACHE_TTL_SECONDS: int = Field(default=30, ge=0, le=3_600)
+    DASHBOARD_CACHE_MAX_ENTRIES: int = Field(default=128, ge=1, le=10_000)
+    DASHBOARD_CACHE_MAX_BYTES: int = Field(default=8_388_608, ge=1)
+    OPERATIONS_METRICS_TOKEN: str = ""
+    OPERATIONS_HEARTBEAT_TTL_SECONDS: int = Field(default=30, ge=10, le=300)
 
     @model_validator(mode="after")
     def validate_production_secret(self) -> "Settings":

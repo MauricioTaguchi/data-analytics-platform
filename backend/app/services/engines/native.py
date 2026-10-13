@@ -54,7 +54,7 @@ def materialize_in_child(
         source_schema = source.schema_arrow
         columns = source_schema.names
         before_rows = source.metadata.num_rows
-    projection = plan.projection(columns)
+    projection = plan.validate_schema(source_schema, engine_name=engine)
     if before_rows > policy.max_rows:
         raise ValueError(f"Datasets are limited to {policy.max_rows:,} rows.")
     if len(projection) > policy.max_columns:
@@ -81,12 +81,6 @@ def materialize_in_child(
 
             if any(character in str(snapshot.path) for character in "*?[]"):
                 raise EngineCapabilityError("DuckDB snapshots require a literal path without glob characters.")
-            # DuckDB resolves quoted identifiers without case sensitivity. Reject
-            # ambiguous schemas instead of silently renaming or selecting a neighbor.
-            for names in (columns, [target for _, target in projection]):
-                folded = [name.lower() for name in names]
-                if len(set(folded)) != len(folded):
-                    raise EngineCapabilityError("DuckDB requires column names distinct ignoring case.")
             with duckdb.connect(
                 database=":memory:",
                 config={
@@ -145,5 +139,5 @@ def materialize_in_child(
         size_bytes=size,
         sha256=digest,
         engine=engine,
-        semantics="projection-v1",
+        semantics=f"projection:{plan.operation}@{plan.operation_version}",
     )

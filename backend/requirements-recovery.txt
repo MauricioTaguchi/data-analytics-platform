@@ -1,0 +1,4 @@
+# Dedicated PostgreSQL recovery runner; not imported by the API image.
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+boto3==1.43.109

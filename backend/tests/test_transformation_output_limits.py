@@ -220,7 +220,7 @@ def test_transformation_fences_after_temp_write_and_before_final_rename(tmp_path
             transaction_fence=lambda: observations.append(
                 (
                     output_path.exists(),
-                    len(list(tmp_path.glob(".*.part.csv"))),
+                    len(list(tmp_path.glob(".*.part.parquet"))),
                 )
             ),
         )
@@ -235,6 +235,6 @@ def test_transformation_fences_after_temp_write_and_before_final_rename(tmp_path
         assert completed.output_path != str(output_path)
         assert not output_path.exists()
         assert db.query(StorageArtifact).one().state == "LIVE"
-        assert not list(tmp_path.glob(".*.part.csv"))
+        assert not list(tmp_path.glob(".*.part.parquet"))
     finally:
         db.close()

@@ -95,7 +95,7 @@ def test_pandas_retains_legacy_csv_operations(tmp_path, policy, pandas_adapter):
         SnapshotRef(source), TransformationPlan("drop_duplicates", {}), output, policy
     )
     assert artifact.rows == 2
-    assert artifact.semantics == "pandas-v1"
+    assert artifact.semantics == "pandas:drop_duplicates@1.0.0"
     assert DatasetService.read_dataframe(output).to_dict("records") == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
 
 
@@ -209,7 +209,7 @@ def test_native_metadata_limits_apply_before_materialization(tmp_path, engine_na
     source = tmp_path / "source.parquet"
     output = tmp_path / "result.parquet"
     pq.write_table(pa.table({"a": [1]}), source)
-    with pytest.raises(ValueError, match="column names are limited"):
+    with pytest.raises(ValueError, match="[Cc]olumn names are limited"):
         runner.run_native(
             engine_name, SnapshotRef(source), TransformationPlan("rename_columns", {"mapping": {"a": "long"}}),
             output, ResourcePolicy(max_output_bytes=1024, quota_remaining_bytes=1024, max_column_name_chars=3),

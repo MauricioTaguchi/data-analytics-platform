@@ -1,5 +1,5 @@
-export type DataRow = Record<string, string | number | null>;
-export type DataOperation = "drop_duplicates" | "fill_nulls" | "rename_columns" | "cast_types";
+export type DataRow = Record<string, string | number | boolean | null>;
+export type DataOperation = "drop_duplicates" | "fill_nulls" | "rename_columns" | "cast_types" | "drop_columns";
 
 export type OperationOptions = { column?: string; value?: string };
 

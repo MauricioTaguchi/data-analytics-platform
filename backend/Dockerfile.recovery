@@ -1,0 +1,24 @@
+# Match the included Compose server's PostgreSQL client major version.
+FROM postgres:16-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-recovery.txt /tmp/requirements-recovery.txt
+RUN python3 -m venv /opt/recovery-venv \
+    && /opt/recovery-venv/bin/pip install --no-cache-dir -r /tmp/requirements-recovery.txt \
+    && groupadd --gid 10001 recovery \
+    && useradd --uid 10001 --gid recovery --no-create-home --shell /usr/sbin/nologin recovery
+
+# Copy only recovery code, never application configuration or credentials.
+COPY --chown=recovery:recovery app/__init__.py /app/app/__init__.py
+COPY --chown=recovery:recovery app/operations/__init__.py /app/app/operations/__init__.py
+COPY --chown=recovery:recovery app/operations/backup.py app/operations/object_backup.py /app/app/operations/
+ENV PATH="/opt/recovery-venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+USER 10001:10001
+ENTRYPOINT []
+CMD ["python", "-m", "app.operations.backup", "--help"]

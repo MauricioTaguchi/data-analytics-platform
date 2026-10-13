@@ -1,0 +1,47 @@
+groups:
+  - name: dataflow-processing
+    rules:
+      # Starting values for evaluation, not a measured production SLO.
+      - alert: DataFlowQueueDelay
+        expr: dataflow_oldest_queued_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DataFlow jobs are waiting longer than the example threshold"
+          description: "Inspect worker heartbeats, resource saturation, and job admission. Tune this threshold from measured workloads."
+      - alert: DataFlowOutboxDelay
+        expr: dataflow_outbox_oldest_unpublished_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Durable work is waiting for broker publication"
+      - alert: DataFlowWorkersMissing
+        expr: dataflow_fresh_workers == 0 and dataflow_telemetry_available == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No fresh worker heartbeat is visible"
+      - alert: DataFlowSchedulerMissing
+        expr: dataflow_fresh_schedulers == 0 and dataflow_telemetry_available == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No fresh recovery scheduler heartbeat is visible"
+      - alert: DataFlowStorageLow
+        expr: dataflow_storage_free_bytes < 536870912
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dataset or report storage is below the example free-space floor"
+      - alert: DataFlowTelemetryUnavailable
+        expr: dataflow_telemetry_available == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Process heartbeat storage cannot be read"
