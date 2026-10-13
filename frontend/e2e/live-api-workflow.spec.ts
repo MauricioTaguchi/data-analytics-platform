@@ -54,7 +54,7 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
 
   await openSection(page, "03 Transformations");
   await page.getByRole("button", { name: "Rename column", exact: true }).click();
-  await page.getByLabel("Column", { exact: true }).selectOption("customer");
+  await page.getByLabel(/^Column/).selectOption("customer");
   await page.getByLabel("Parameter", { exact: true }).fill("customer_name");
   await page.getByRole("button", { name: "Apply transformation" }).click();
   await expect(page.getByText("The version-controlled transformation completed successfully.")).toBeVisible({ timeout: 30_000 });
