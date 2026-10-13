@@ -1,2 +1,2 @@
 # Optional versioned object-storage destination for verified backup archives.
-boto3==1.43.109
+boto3==1.43.111
