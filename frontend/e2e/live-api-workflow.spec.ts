@@ -15,6 +15,7 @@ async function openSection(page: Page, name: string) {
 
 liveTest("authenticated workflow persists transformations and undo before dashboard and PDF report", async ({ page }) => {
   test.setTimeout(120_000);
+  page.setDefaultTimeout(15_000);
   const email = `reviewer-${Date.now()}-${test.info().retry}@example.com`;
   await page.goto("/");
   await page.getByRole("button", { name: "Skip tour" }).click();
@@ -33,12 +34,15 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   const { access_token: accessToken } = await registrationResponse.json();
   const apiUrl = registrationResponse.url().replace(/\/auth\/register$/, "");
   const headers = { Authorization: `Bearer ${accessToken}` };
-  await expect(page.getByText("Live API", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog", { name: "Connect to the production workflow" })).toBeHidden();
+  await expect(page.locator(".dataset-heading").getByText("Live API", { exact: true })).toBeVisible();
+  const uploadInput = page.locator('input[type="file"]');
+  await expect(uploadInput).toBeEnabled();
 
   const uploadResponsePromise = page.waitForResponse(
     (response) => /\/datasets\/project\/\d+$/.test(response.url()) && response.request().method() === "POST",
   );
-  await page.locator('input[type="file"]').setInputFiles(path.resolve("../docs/sample-data/sales.csv"));
+  await uploadInput.setInputFiles(path.resolve("../docs/sample-data/sales.csv"));
   const uploadResponse = await uploadResponsePromise;
   expect(uploadResponse.status(), await uploadResponse.text()).toBe(202);
   const { dataset_id: datasetId } = await uploadResponse.json();
