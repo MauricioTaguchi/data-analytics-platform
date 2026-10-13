@@ -68,6 +68,12 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(transformedPreview.columns).toContain("customer_name");
   expect(transformedPreview.columns).not.toContain("customer");
 
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export current version" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("processed-sales.parquet");
+  expect(await download.failure()).toBeNull();
+
   const undoResponsePromise = page.waitForResponse(
     (response) => response.url() === `${datasetUrl}/transformations/undo` && response.request().method() === "POST",
   );

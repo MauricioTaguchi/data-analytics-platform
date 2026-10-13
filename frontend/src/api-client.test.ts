@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
+import { apiClient, authenticate, cancelJob, createChart, createDashboard, defaultApiUrlForHostname, disconnectApi, downloadDataset, fetchDataset, hasActiveSession, onSessionExpired, startDatasetProfile, undoDatasetTransformation } from "./api-client";
 
 const originalAdapter = apiClient.defaults.adapter;
 
@@ -21,6 +21,31 @@ afterEach(async () => {
 });
 
 describe("API session client", () => {
+  it.each([
+    ['attachment; filename="processed-sales.parquet"', "processed-sales.parquet"],
+    ["attachment; filename=processed-sales.parquet", "processed-sales.parquet"],
+    ['attachment; filename="processed-sales;2026.parquet"', "processed-sales;2026.parquet"],
+    ['attachment; filename="processed-vendas São Paulo.parquet"', "processed-vendas São Paulo.parquet"],
+    ["attachment; filename*=UTF-8''processed-vendas%20S%C3%A3o%20Paulo.parquet", "processed-vendas São Paulo.parquet"],
+    ['attachment; filename="fallback.parquet"; filename*=UTF-8\'pt-BR\'processed-vendas%20S%C3%A3o%20Paulo.parquet', "processed-vendas São Paulo.parquet"],
+    ["attachment; filename*=ISO-8859-1''processed-caf%E9.parquet", "processed-café.parquet"],
+    ['attachment; filename="fallback.parquet"; filename*=UTF-8\'\'%broken', "fallback.parquet"],
+    ['attachment; filename="../../processed-sales.parquet"', "processed-sales.parquet"],
+    ["attachment; filename*=UTF-8''%invalid", "processed-dataset.bin"],
+    [undefined, "processed-dataset.bin"],
+  ])("preserves the server export filename from %s", async (disposition, expectedFilename) => {
+    const blob = new Blob(["PAR1"], { type: "application/octet-stream" });
+    apiClient.defaults.adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
+      expect(config.url).toBe("/datasets/7/export");
+      expect(config.responseType).toBe("blob");
+      return { ...response(config, 200, blob), headers: { "content-disposition": disposition } };
+    });
+
+    const result = await downloadDataset(7);
+    expect(result.blob).toBe(blob);
+    expect(result.filename).toBe(expectedFilename);
+  });
+
   it("sends the observed revision when undoing and surfaces conflicts", async () => {
     const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
       expect(config.url).toBe("/datasets/7/transformations/undo");

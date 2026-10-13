@@ -1,5 +1,8 @@
 from io import BytesIO
 
+import pyarrow.parquet as pq
+
+from app.core.config import settings
 from tests.conftest import wait_for_job
 
 
@@ -95,6 +98,17 @@ def test_complete_dataset_flow(client, auth_headers):
     assert history.json()[0]["operation"] == "drop_duplicates"
     assert history.json()[0]["status"] == "completed"
 
+    exported = client.get(
+        f"/api/v1/datasets/{dataset_id}/export",
+        headers={**auth_headers, "Origin": settings.CORS_ORIGINS[0]},
+    )
+    assert exported.status_code == 200
+    assert 'filename="processed-sample.parquet"' in exported.headers["content-disposition"]
+    assert "content-disposition" in exported.headers["access-control-expose-headers"].lower()
+    assert pq.read_table(BytesIO(exported.content)).to_pydict() == {
+        "name": ["Ana", "Bruno"], "age": [30, 40], "salary": [5000, 7000],
+    }
+
     undo = client.post(
         f"/api/v1/datasets/{dataset_id}/transformations/undo",
         json={"expected_version": 2},
@@ -108,3 +122,7 @@ def test_complete_dataset_flow(client, auth_headers):
         headers=auth_headers,
     )
     assert restored.json()["total_rows"] == 3
+
+    restored_export = client.get(f"/api/v1/datasets/{dataset_id}/export", headers=auth_headers)
+    assert restored_export.content == csv_content
+    assert 'filename="processed-sample.csv"' in restored_export.headers["content-disposition"]

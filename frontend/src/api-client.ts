@@ -430,9 +430,43 @@ export async function undoDatasetTransformation(datasetId: number, expectedVersi
   throw lastError;
 }
 
+function safeDownloadFilename(value: string) {
+  const basename = value.replace(/\\/g, "/").split("/").pop()?.trim() || "";
+  const filename = Array.from(basename, (character) => (
+    character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || '<>:"|?*'.includes(character) ? "_" : character
+  )).join("").replace(/[. ]+$/, "");
+  return filename || null;
+}
+
+function datasetDownloadFilename(disposition: unknown) {
+  if (typeof disposition !== "string") return "processed-dataset.bin";
+  let regular: string | null = null;
+  let extended: string | null = null;
+  const parameters = /(?:^|;)\s*(filename\*?)\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]*))/gi;
+  for (const match of disposition.matchAll(parameters)) {
+    const value = match[2] === undefined ? match[3].trim() : match[2].replace(/\\(.)/g, "$1");
+    if (match[1].toLowerCase() === "filename") {
+      regular = safeDownloadFilename(value);
+      continue;
+    }
+    const encoded = /^([^']*)'[^']*'(.*)$/.exec(value);
+    if (!encoded || /%(?![\da-f]{2})/i.test(encoded[2])) continue;
+    try {
+      const charset = encoded[1].toLowerCase();
+      if (charset === "utf-8") extended = safeDownloadFilename(decodeURIComponent(encoded[2]));
+      else if (charset === "iso-8859-1") {
+        extended = safeDownloadFilename(encoded[2].replace(/%([\da-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))));
+      }
+    } catch {
+      // An invalid extended value may still have a usable regular filename.
+    }
+  }
+  return extended || regular || "processed-dataset.bin";
+}
+
 export async function downloadDataset(datasetId: number) {
   const response = await apiClient.get<Blob>(`/datasets/${datasetId}/export`, { responseType: "blob" });
-  return response.data;
+  return { blob: response.data, filename: datasetDownloadFilename(response.headers["content-disposition"]) };
 }
 
 export async function listDashboards(projectId: number, signal?: AbortSignal) {

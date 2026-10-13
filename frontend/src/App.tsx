@@ -142,8 +142,10 @@ export function App() {
 
   async function exportDataset() {
     try {
-      if (workspace.dataset) saveBlob(await downloadDataset(workspace.dataset.id), `processed-${workspace.datasetName}`);
-      else {
+      if (workspace.dataset) {
+        const download = await downloadDataset(workspace.dataset.id);
+        saveBlob(download.blob, download.filename);
+      } else {
         const csv = [workspace.columns.join(","), ...workspace.rows.map((row) => workspace.columns.map((column) => JSON.stringify(row[column] ?? "")).join(","))].join("\n");
         saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `processed-${workspace.datasetName}`);
       }
