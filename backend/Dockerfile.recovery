@@ -1,5 +1,5 @@
 # Match the included Compose server's PostgreSQL client major version.
-FROM postgres:16-bookworm
+FROM postgres:18-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv \
