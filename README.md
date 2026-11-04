@@ -42,6 +42,8 @@ pnpm dev
 
 Open `http://localhost:5173`. Try a transformation, inspect its lineage, and undo it before exploring dashboards and reports.
 
+For a five-row sales example, see [Which channel led after a duplicate sale was removed?](docs/SALES_REPLAY_CASE.md). The walkthrough uses an uploadable CSV to distinguish a replayed record from a legitimate repeat purchase.
+
 ### Run the complete platform
 
 Requirements: Docker Desktop and Docker Compose. From the repository root:
