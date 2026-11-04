@@ -17,4 +17,6 @@ xlrd==2.0.1
 pyarrow==25.0.0
 redis==5.2.1
 celery==5.4.0
+# Keep Celery's Redis transport compatible with redis-py 5.x.
+kombu[redis]==5.6.2
 reportlab==4.2.5
