@@ -6,6 +6,10 @@
 
 Upload, inspect, transform, undo, and publish analytics from one workspace.
 
+[**Live demo**](https://mauriciotaguchi.com.br/demos/dataflow/) · [**Case study**](https://mauriciotaguchi.com.br/case-studies/dataflow.html)
+
+No installation needed. The hosted demo uses synthetic sample data; changes reset on reload, and uploads and API connections are disabled.
+
 [![CI](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/codeql.yml/badge.svg)](https://github.com/MauricioTaguchi/data-analytics-platform/actions/workflows/codeql.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB)](https://www.python.org/)
