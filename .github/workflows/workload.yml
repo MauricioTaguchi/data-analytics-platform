@@ -57,8 +57,8 @@ jobs:
       MIN_FREE_DISK_SPACE_MB: '1'
       TRANSFORMATION_ENGINE_THREADS: '1'
       TRANSFORMATION_ENGINE_MEMORY_MB: '512'
-      UPLOAD_DIR: ${{ runner.temp }}/dataflow-workload/uploads
-      REPORT_DIR: ${{ runner.temp }}/dataflow-workload/reports
+      UPLOAD_DIR: /tmp/dataflow-workload/uploads
+      REPORT_DIR: /tmp/dataflow-workload/reports
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -175,7 +175,7 @@ jobs:
               kill -TERM -- "-$workload_pid" 2>/dev/null || true
             fi
           done
-          rm -rf "$RUNNER_TEMP/dataflow-workload/uploads" "$RUNNER_TEMP/dataflow-workload/reports"
+          rm -rf /tmp/dataflow-workload/uploads /tmp/dataflow-workload/reports
       - name: Print bounded diagnostics on failure
         if: failure()
         run: |
