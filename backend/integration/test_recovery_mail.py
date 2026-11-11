@@ -1,4 +1,10 @@
-"""Exercise durable SMTP delivery across real API/scheduler restarts."""
+"""Exercise durable delivery with a loopback SMTP fixture and real processes.
+
+The fixture deliberately uses the test-only plaintext transport. Production
+TLS requirements remain enforced by configuration/security tests; this journey
+proves PostgreSQL-backed delivery/retry behavior, not external TLS or inbox
+delivery.
+"""
 
 from email.parser import BytesParser
 from email.policy import default as email_policy
@@ -54,6 +60,9 @@ def test_recovery_mail_survives_restart_and_retries_without_changing_link(runtim
             runtime.stop_schedulers()
             runtime.stop("api")
             runtime.environment.update({
+                # Plain SMTP is allowed only in explicitly disposable test/dev
+                # environments. Keep real PostgreSQL/Redis and CELERY_EAGER=false.
+                "ENVIRONMENT": "test",
                 "SMTP_HOST": "127.0.0.1", "SMTP_PORT": str(server.server_address[1]),
                 "SMTP_TLS_MODE": "plain", "SMTP_USERNAME": "", "SMTP_PASSWORD": "",
                 "SMTP_FROM_EMAIL": "accounts@example.com", "PASSWORD_RESET_URL": "https://app.example.com/",
