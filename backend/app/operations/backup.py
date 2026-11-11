@@ -89,8 +89,11 @@ def _run_postgres(command: list[str], parameters: dict[str, Any]) -> None:
 
 def _assert_quiescent(cursor) -> None:
     cursor.execute("SELECT pg_stat_clear_snapshot()")
+    # PostgreSQL can hide backend_type for sessions owned by another role.
+    # Unknown activity must block capture just like a known client connection.
     cursor.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                   "AND pid <> pg_backend_pid() AND backend_type = 'client backend'")
+                   "AND pid <> pg_backend_pid() "
+                   "AND (backend_type = 'client backend' OR backend_type IS NULL)")
     if cursor.fetchone()[0]:
         raise RecoveryError("Stop API, workers, scheduler, and other database clients before backup.")
     cursor.execute("SELECT count(*) FROM public.job_records WHERE status NOT IN ('SUCCESS', 'FAILURE', 'CANCELLED')")

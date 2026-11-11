@@ -2,6 +2,8 @@
 
 This guide describes the included development and portfolio deployment paths. It includes an opt-in Compose backup schedule, isolated recovery tooling, protected metrics, and local Prometheus/Alertmanager configuration. Adding these files does not provision hosting, a bucket, SMTP, an alert recipient, or high availability. Review the concrete [rollout options and budget](ROLLOUT.md) and [Known limitations](LIMITATIONS.md) before accepting important data.
 
+For an operator-controlled host, the [standalone production Compose candidate](../ops/production/README.md) supplies separate runtime/migration/backup identities, private database and broker networks, supplied TLS, same-origin frontend routing and an explicitly targeted maintenance backup. It requires actual host, DNS/certificate and external-service configuration. Do not merge that file with the development Compose file below.
+
 ## Local Docker deployment
 
 1. Copy `backend/.env.example` to `backend/.env`.

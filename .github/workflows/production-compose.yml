@@ -1,0 +1,287 @@
+name: Production Compose candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose.production.yml'
+      - 'backend/**'
+      - 'frontend/Dockerfile'
+      - 'frontend/nginx.conf'
+      - 'ops/production/**'
+      - 'deploy/backup/**'
+      - '.github/workflows/production-compose.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose.production.yml'
+      - 'backend/**'
+      - 'ops/production/**'
+      - 'deploy/backup/**'
+      - '.github/workflows/production-compose.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-compose-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disposable-production-path:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      DATAFLOW_SMOKE_ROOT: /tmp/dataflow-production-smoke
+      DATAFLOW_COMPOSE_ENV_FILE: /tmp/dataflow-production-smoke/config/compose.env
+      DATAFLOW_BACKUP_ENV_FILE: /tmp/dataflow-production-smoke/config/backup.env
+      DATAFLOW_BACKUP_COMPOSE_FILE: docker-compose.production.yml
+      DATAFLOW_BACKUP_LOCK_FILE: /tmp/dataflow-production-smoke/backup.lock
+      DATAFLOW_BACKUP_REQUIRE_REMOTE: 'false'
+      DATAFLOW_PROJECT_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Create external disposable credentials and trusted test TLS
+        run: |
+          umask 077
+          mkdir -p "$DATAFLOW_SMOKE_ROOT/tls" "$DATAFLOW_SMOKE_ROOT/evidence"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3 \
+            -subj '/CN=dataflow.test' -addext 'subjectAltName=DNS:dataflow.test' \
+            -keyout "$DATAFLOW_SMOKE_ROOT/tls/key.pem" \
+            -out "$DATAFLOW_SMOKE_ROOT/tls/cert.pem" >/dev/null 2>&1
+          python ops/production/configure.py --directory "$DATAFLOW_SMOKE_ROOT/config" \
+            --hostname dataflow.test --allow-test-hostname \
+            --tls-cert "$DATAFLOW_SMOKE_ROOT/tls/cert.pem" --tls-key "$DATAFLOW_SMOKE_ROOT/tls/key.pem"
+          python ops/production/configure.py --check "$DATAFLOW_SMOKE_ROOT/config"
+          printf '127.0.0.1 dataflow.test\n' | sudo tee -a /etc/hosts >/dev/null
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml config --quiet
+      - name: Build the candidate images and install the HTTP verifier
+        run: |
+          python -m pip install -r backend/requirements-dev.txt
+          python -m pytest backend/recovery_tests/test_production_configuration.py backend/recovery_tests/test_backup_scheduler.py -q
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            --profile tools --profile recovery build --pull
+          python - <<'PY'
+          import os
+          from dotenv import dotenv_values
+          values = dotenv_values(os.environ['DATAFLOW_COMPOSE_ENV_FILE'])
+          path = values['DATAFLOW_BACKUP_DIR']
+          assert path and path.startswith(os.environ['DATAFLOW_SMOKE_ROOT'] + '/')
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write(f'DATAFLOW_BACKUP_DIR={path}\n')
+          PY
+      - name: Bootstrap a fresh database with a separate owner identity
+        run: |
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            up -d --wait --wait-timeout 120 db redis
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            run --rm bootstrap
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            run --rm bootstrap
+      - name: Start restricted runtime services behind the TLS proxy
+        run: |
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            up -d --wait --wait-timeout 180 api worker interactive-worker scheduler web proxy
+          touch "$DATAFLOW_SMOKE_ROOT/stack-started"
+      - name: Verify real runtime permissions and reject history mutation
+        run: |
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            exec -T api python scripts/check_runtime.py
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            exec -T api python - <<'PY' > "$DATAFLOW_SMOKE_ROOT/evidence/runtime-role.json"
+          import json
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.exc import DBAPIError
+          from sqlalchemy.pool import NullPool
+          from app.core.config import settings
+          assert settings.ENVIRONMENT == 'production'
+          engine = create_engine(settings.DATABASE_URL, poolclass=NullPool)
+          denied = []
+          with engine.connect() as connection:
+              role = connection.execute(text('SELECT current_user')).scalar_one()
+              assert role == 'dataflow_runtime', 'Unexpected runtime identity.'
+              connection.rollback()
+              attempts = {
+                  'create_table': 'CREATE TABLE public.runtime_smoke_forbidden (id integer)',
+                  'snapshot_identity': 'UPDATE public.dataset_snapshots SET sha256=sha256 WHERE false',
+                  'delete_audit': 'DELETE FROM public.dataset_events WHERE false',
+                  'truncate_audit': 'TRUNCATE public.dataset_events',
+                  'disable_audit_guard': 'ALTER TABLE public.dataset_events DISABLE TRIGGER ALL',
+              }
+              for label, statement in attempts.items():
+                  try:
+                      connection.execute(text(statement))
+                  except DBAPIError as error:
+                      assert getattr(error.orig, 'pgcode', None) == '42501', 'Expected a database permission denial.'
+                      denied.append(label)
+                  else:
+                      raise AssertionError('Runtime operation unexpectedly allowed: ' + label)
+                  finally:
+                      connection.rollback()
+          engine.dispose()
+          print(json.dumps({'status': 'verified', 'runtime_role': role, 'environment': settings.ENVIRONMENT,
+                            'permission_denials': denied, 'production_deployed': False}, sort_keys=True))
+          PY
+          cat "$DATAFLOW_SMOKE_ROOT/evidence/runtime-role.json"
+          docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+            run --rm --no-deps -T recovery python - <<'PY'
+          import os
+          from contextlib import closing
+          import psycopg2
+          from app.operations.backup import _connection_parameters
+          with closing(psycopg2.connect(**_connection_parameters(os.environ['DATABASE_URL']))) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("SELECT current_user, pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')")
+                  assert cursor.fetchone() == ('dataflow_backup', True), 'Backup must inherit actual statistics visibility.'
+                  cursor.execute('SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname=current_user')
+                  assert cursor.fetchone() == (False,), 'Backup must not be an administrator.'
+          print('COMPOSE_BACKUP_IDENTITY distinct capture role and effective statistics grant verified')
+          PY
+      - name: Verify Docker exposes only the proxy ports
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          command = ['docker', 'compose', '--env-file', os.environ['DATAFLOW_COMPOSE_ENV_FILE'], '-f', 'docker-compose.production.yml']
+          result = {}
+          for service in ('db', 'redis', 'api', 'worker', 'interactive-worker', 'scheduler', 'web', 'proxy'):
+              identity = subprocess.check_output([*command, 'ps', '-q', service], text=True).strip()
+              assert identity, 'Required service is not running: ' + service
+              container = json.loads(subprocess.check_output(['docker', 'inspect', identity], text=True))[0]
+              published = sorted(port for port, bindings in container['NetworkSettings']['Ports'].items() if bindings)
+              assert published == (['8080/tcp', '8443/tcp'] if service == 'proxy' else []), 'Unexpected host exposure: ' + service
+              if service == 'proxy':
+                  for container_port, host_port in (('8080/tcp', '80'), ('8443/tcp', '443')):
+                      assert {binding['HostPort'] for binding in container['NetworkSettings']['Ports'][container_port]} == {host_port}
+              if service in {'api', 'worker', 'interactive-worker', 'scheduler'}:
+                  assert container['Config']['User'] in {'10001', '10001:10001'}, 'Runtime must use the application UID.'
+              result[service] = {'published_ports': published, 'container_user': container['Config']['User']}
+          report = {'status': 'verified', 'services': result, 'production_deployed': False}
+          (Path(os.environ['DATAFLOW_SMOKE_ROOT']) / 'evidence' / 'network.json').write_text(json.dumps(report, indent=2) + '\n')
+          print('COMPOSE_NETWORK ' + json.dumps(report, sort_keys=True))
+          PY
+      - name: Verify login, upload, transformation, report and undo through trusted TLS
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import ssl
+          import httpx
+          from app.operations.workload import Config, print_summary, run_workload
+          root = Path(os.environ['DATAFLOW_SMOKE_ROOT'])
+          tls = ssl.create_default_context(cafile=str(root / 'tls' / 'cert.pem'))
+          config = Config(base_url='https://dataflow.test', rows=32, concurrency=1, formats=('csv',),
+                          duration_limit=300, job_timeout=90, revision=os.environ['GITHUB_SHA'])
+          with httpx.Client(verify=tls, follow_redirects=False, trust_env=False, timeout=10) as client:
+              redirect = client.get('http://dataflow.test/')
+              assert redirect.status_code in {301, 308} and redirect.headers['location'].startswith('https://dataflow.test')
+              web = client.get('https://dataflow.test/')
+              assert web.status_code == 200 and 'max-age=' in web.headers.get('strict-transport-security', '')
+              assert client.get('https://dataflow.test/api/v1/projects').status_code == 401
+          report = run_workload(config, client_factory=lambda: httpx.Client(
+              base_url=config.base_url, verify=tls, follow_redirects=False, trust_env=False))
+          (root / 'evidence' / 'journey.json').write_text(json.dumps(report, indent=2) + '\n')
+          print_summary(report)
+          assert report['accepted'], 'Synthetic content or lifecycle checks failed.'
+          PY
+      - name: Verify coordinated local backup and runtime restart compatibility
+        run: |
+          sudo chown 10001:10001 "$DATAFLOW_BACKUP_DIR"
+          sudo chmod 700 "$DATAFLOW_BACKUP_DIR"
+          sudo -E bash deploy/backup/run-backup.sh > "$DATAFLOW_SMOKE_ROOT/evidence/backup-run.log" 2>&1
+          sudo -E python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ['DATAFLOW_SMOKE_ROOT'])
+          backups = Path(os.environ['DATAFLOW_BACKUP_DIR'])
+          captures = list(backups.glob('*.capture.json'))
+          completions = list(backups.glob('*.completed.json'))
+          assert len(captures) == len(completions) == 1, 'Expected one coordinated backup.'
+          capture = json.loads(captures[0].read_text())
+          completed = json.loads(completions[0].read_text())
+          assert capture['files'] >= 3 and capture['size_bytes'] > 0
+          assert completed['status'] == 'local_only', 'This CI must not transfer backups externally.'
+          report = {'status': 'verified_local_backup', 'files': capture['files'], 'size_bytes': capture['size_bytes'],
+                    'sha256': capture['sha256'], 'elapsed_seconds': capture['elapsed_seconds'],
+                    'remote_copy': False, 'production_deployed': False}
+          (root / 'evidence' / 'backup.json').write_text(json.dumps(report, indent=2) + '\n')
+          print('COMPOSE_BACKUP ' + json.dumps(report, sort_keys=True))
+          PY
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import ssl
+          import time
+          import httpx
+          tls = ssl.create_default_context(cafile=str(Path(os.environ['DATAFLOW_SMOKE_ROOT']) / 'tls' / 'cert.pem'))
+          with httpx.Client(verify=tls, trust_env=False, timeout=3) as client:
+              for attempt in range(90):
+                  try:
+                      if client.get('https://dataflow.test/health/ready').status_code == 200:
+                          print('COMPOSE_RESTART readiness restored after maintenance')
+                          break
+                  except httpx.HTTPError:
+                      pass
+                  time.sleep(1)
+              else:
+                  raise AssertionError('API did not recover after backup maintenance.')
+          PY
+      - name: Print bounded diagnostics after failure
+        if: failure()
+        run: |
+          if [ -f "$DATAFLOW_COMPOSE_ENV_FILE" ]; then
+            docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml logs --no-color --tail 60 || true
+            python - <<'PY'
+          import json
+          import os
+          import subprocess
+          command = ['docker', 'compose', '--env-file', os.environ['DATAFLOW_COMPOSE_ENV_FILE'], '-f', 'docker-compose.production.yml']
+          for service in ('db', 'redis', 'api', 'worker', 'interactive-worker', 'scheduler', 'web', 'proxy'):
+              result = subprocess.run([*command, 'ps', '-aq', service], capture_output=True, text=True, timeout=10)
+              for identity in result.stdout.splitlines()[:1]:
+                  health = subprocess.run(['docker', 'inspect', '--format', '{{json .State.Health}}', identity],
+                                          capture_output=True, text=True, timeout=10)
+                  if health.returncode or health.stdout.strip() in {'', 'null'}:
+                      continue
+                  state = json.loads(health.stdout)
+                  attempts = [{'exit_code': entry.get('ExitCode'), 'output': entry.get('Output', '')[-800:]}
+                              for entry in state.get('Log', [])[-3:]]
+                  print('COMPOSE_HEALTH ' + json.dumps({'service': service, 'status': state.get('Status'), 'attempts': attempts}))
+          PY
+          fi
+          if [ -f "$DATAFLOW_SMOKE_ROOT/evidence/backup-run.log" ]; then
+            tail -n 60 "$DATAFLOW_SMOKE_ROOT/evidence/backup-run.log"
+          fi
+      - name: Reclaim only the disposable stack, volumes and credentials
+        if: always()
+        run: |
+          if [ -f "$DATAFLOW_COMPOSE_ENV_FILE" ]; then
+            docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml \
+              --profile tools --profile recovery down --volumes --remove-orphans || true
+          fi
+          sudo rm -rf "$DATAFLOW_SMOKE_ROOT/config" "$DATAFLOW_SMOKE_ROOT/tls" "$DATAFLOW_SMOKE_ROOT/backups"
+      - name: Preserve sanitized candidate evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-compose-candidate
+          path: |
+            /tmp/dataflow-production-smoke/evidence/runtime-role.json
+            /tmp/dataflow-production-smoke/evidence/network.json
+            /tmp/dataflow-production-smoke/evidence/journey.json
+            /tmp/dataflow-production-smoke/evidence/backup.json
+          if-no-files-found: warn
+          retention-days: 30

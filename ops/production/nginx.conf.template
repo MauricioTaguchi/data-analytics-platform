@@ -1,0 +1,49 @@
+# This proxy terminates TLS directly. Do not place an unconfigured proxy in front.
+server {
+    listen 8080 default_server;
+    server_name ${DATAFLOW_PUBLIC_HOST};
+    return 308 https://${DATAFLOW_PUBLIC_HOST}$request_uri;
+}
+
+server {
+    listen 8443 ssl default_server;
+    server_name ${DATAFLOW_PUBLIC_HOST};
+    ssl_certificate /run/tls/certificate.pem;
+    ssl_certificate_key /run/tls/private-key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    if ($host != "${DATAFLOW_PUBLIC_HOST}") { return 421; }
+    client_max_body_size 52m;
+    client_header_timeout 15s;
+    client_body_timeout 30s;
+    send_timeout 30s;
+    keepalive_timeout 30s;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    # Operational metrics remain reachable only on the private container network.
+    location ^~ /api/v1/operations { return 404; }
+    location /api/ {
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+    location = /health/ready {
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+    location / {
+        proxy_pass http://web:80;
+        proxy_set_header Host $host;
+    }
+}

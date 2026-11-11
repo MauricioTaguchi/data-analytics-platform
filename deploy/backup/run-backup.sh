@@ -40,7 +40,20 @@ command -v flock >/dev/null
 exec 9>>"$DATAFLOW_BACKUP_LOCK_FILE"
 flock -n 9 || { echo 'Another maintenance backup is running.' >&2; exit 75; }
 cd "$DATAFLOW_PROJECT_DIR"
-compose=(docker compose --project-directory "$DATAFLOW_PROJECT_DIR" -f docker-compose.yml -f docker-compose.backup.yml)
+compose=(docker compose --project-directory "$DATAFLOW_PROJECT_DIR")
+if [[ -n "${DATAFLOW_BACKUP_COMPOSE_FILE:-}" ]]; then
+  : "${DATAFLOW_COMPOSE_ENV_FILE:?An explicit Compose environment file is required for standalone backups}"
+  [[ "$DATAFLOW_COMPOSE_ENV_FILE" = /* && -f "$DATAFLOW_COMPOSE_ENV_FILE" && ! -L "$DATAFLOW_COMPOSE_ENV_FILE" ]] || {
+    echo 'Use an absolute protected Compose environment file.' >&2; exit 1;
+  }
+  permissions=$(stat -c '%a' "$DATAFLOW_COMPOSE_ENV_FILE")
+  [[ "$permissions" = 600 || "$permissions" = 400 ]] || {
+    echo 'The Compose environment file must have mode 0600 or 0400.' >&2; exit 1;
+  }
+  compose+=(--env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f "$DATAFLOW_BACKUP_COMPOSE_FILE")
+else
+  compose+=(-f docker-compose.yml -f docker-compose.backup.yml)
+fi
 "${compose[@]}" config --quiet
 "${compose[@]}" run --rm --no-deps recovery python -m app.operations.backup check-idle
 

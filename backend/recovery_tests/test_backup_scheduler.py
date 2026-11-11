@@ -44,9 +44,13 @@ if "create" in args:
     configuration.write_text("# Protected operator configuration\n", encoding="utf-8")
     configuration.chmod(0o600)
     log = tmp_path / "commands.jsonl"
-    environment = {**os.environ, "PATH": f"{commands}:{os.environ['PATH']}",
+    # The production smoke workflow supplies real Compose settings. This fake
+    # Docker fixture must be independent of every caller's deployment settings.
+    inherited = {key: value for key, value in os.environ.items() if not key.startswith("DATAFLOW_")}
+    environment = {**inherited, "PATH": f"{commands}:{os.environ['PATH']}",
                    "DATAFLOW_PROJECT_DIR": str(tmp_path), "DATAFLOW_BACKUP_DIR": str(backups),
                    "DATAFLOW_BACKUP_ENV_FILE": str(configuration), "DATAFLOW_BACKUP_LOCK_FILE": str(tmp_path / "lock"),
+                   "DATAFLOW_BACKUP_REQUIRE_REMOTE": "true",
                    "COMMAND_LOG": str(log), "DATAFLOW_BACKUP_S3_BUCKET": "test-private-backups"}
 
     def run(fail_at="", **overrides):
@@ -97,3 +101,25 @@ def test_local_only_rehearsal_requires_explicit_opt_out(maintenance):
     result, calls = maintenance(DATAFLOW_BACKUP_S3_BUCKET="", DATAFLOW_BACKUP_REQUIRE_REMOTE="false")
     assert result.returncode == 0, result.stderr
     assert not any("upload" in call for call in calls)
+
+
+def test_standalone_backup_uses_one_explicit_compose_file_for_every_operation(maintenance, tmp_path):
+    configuration = tmp_path / "compose.env"
+    configuration.write_text("DATAFLOW_COMPOSE_PROJECT_NAME=isolated-production\n")
+    configuration.chmod(0o600)
+    result, calls = maintenance(DATAFLOW_BACKUP_COMPOSE_FILE="docker-compose.production.yml",
+                                DATAFLOW_COMPOSE_ENV_FILE=str(configuration))
+    assert result.returncode == 0, result.stderr
+    assert calls
+    for call in calls:
+        assert call[call.index("--env-file") + 1] == str(configuration)
+        assert call.count("-f") == 1
+        assert call[call.index("-f") + 1] == "docker-compose.production.yml"
+        assert "docker-compose.yml" not in call
+
+
+def test_standalone_backup_requires_explicit_environment_before_stopping_services(maintenance):
+    result, calls = maintenance(DATAFLOW_BACKUP_COMPOSE_FILE="docker-compose.production.yml",
+                                DATAFLOW_COMPOSE_ENV_FILE="")
+    assert result.returncode != 0
+    assert not calls
