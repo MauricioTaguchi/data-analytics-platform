@@ -38,7 +38,7 @@ def create_report(
         # Shared lock order with transformations and snapshot retention prevents
         # admission from binding a head that is concurrently replaced/expired.
         JobService.lock_owner(db, user.id)
-        project = db.query(Project).filter(Project.id == project_id, Project.owner_id == user.id).first()
+        project = db.query(Project).filter(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)).first()
         dataset = (db.query(Dataset).filter(
             Dataset.id == dataset_id, Dataset.project_id == project_id, Dataset.deleted_at.is_(None),
         ).populate_existing().with_for_update().first())
@@ -99,12 +99,13 @@ def list_reports(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.owner_id == user.id).first()
+    project = db.query(Project).filter(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     return (
         db.query(Report)
-        .filter(Report.project_id == project_id)
+        .join(Dataset, Dataset.id == Report.dataset_id)
+        .filter(Report.project_id == project_id, Dataset.deleted_at.is_(None))
         .order_by(Report.created_at.desc())
         .all()
     )
@@ -118,7 +119,9 @@ def report_status(
     report = (
         db.query(Report)
         .join(Project, Project.id == Report.project_id)
-        .filter(Report.id == report_id, Project.owner_id == user.id)
+        .join(Dataset, Dataset.id == Report.dataset_id)
+        .filter(Dataset.deleted_at.is_(None))
+        .filter(Report.id == report_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
         .first()
     )
     if not report:
@@ -145,7 +148,9 @@ def download_report(
     report = (
         db.query(Report)
         .join(Project, Project.id == Report.project_id)
-        .filter(Report.id == report_id, Project.owner_id == user.id)
+        .join(Dataset, Dataset.id == Report.dataset_id)
+        .filter(Dataset.deleted_at.is_(None))
+        .filter(Report.id == report_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
         .first()
     )
     if not report or report.status != "completed" or not report.file_path:
@@ -165,7 +170,9 @@ def delete_report(
     report = (
         db.query(Report)
         .join(Project, Project.id == Report.project_id)
-        .filter(Report.id == report_id, Project.owner_id == user.id)
+        .join(Dataset, Dataset.id == Report.dataset_id)
+        .filter(Dataset.deleted_at.is_(None))
+        .filter(Report.id == report_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
         .first()
     )
     if not report:

@@ -57,4 +57,6 @@ After cleanup, the mean recorded order is **BRL 765.97**, using three known amou
 
 No real users, external professional approval or customer feedback are claimed. For a future consented pilot, ask one analyst to reproduce the decision without coaching, then explain which row was removed, why the two monitor orders remain, and why one amount is still unknown. Ask one engineer to run the command and challenge the metric definitions and failure boundaries.
 
+Use the [human validation session packet](VALIDATION_SESSIONS.md) for consent, unassisted tasks, accessibility/device checks and outcome recording. The sessions can run against the complete local application without paid hosting. Preparing this packet does not complete the pilot.
+
 Record each participant's actual completion, errors, questions and time to the correct decision; retain only agreed, non-sensitive notes. Success for this narrow pilot means both can reproduce the totals, identify the missing amount and explain the mean denominator. A failure becomes a recorded issue and another test or usability change. Leave these outcomes unfilled until the sessions occur; this exercise alone does not demonstrate production adoption, savings or seniority.

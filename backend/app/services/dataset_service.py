@@ -309,7 +309,7 @@ class DatasetService:
 
     @staticmethod
     def ensure_project(db: Session, project_id: int, owner_id: int) -> Project:
-        project = db.query(Project).filter(Project.id == project_id, Project.owner_id == owner_id).first()
+        project = db.query(Project).filter(Project.id == project_id, Project.owner_id == owner_id, Project.deleted_at.is_(None)).first()
         if not project:
             raise ValueError("Project not found.")
         return project
@@ -485,6 +485,7 @@ class DatasetService:
                 owner_id,
                 exclude_task_id=capacity_task_id,
             )
+            cls.ensure_project(db, project_id, owner_id)
             cls.ensure_storage_quota(db, owner_id, uploaded_bytes)
 
             dataset = Dataset(

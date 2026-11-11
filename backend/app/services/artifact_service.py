@@ -223,7 +223,9 @@ class ArtifactService:
         historical_reference = true() if manifest is None or manifest.availability != "EXPIRED" else false()
         if (
             db.query(Transformation.id)
+            .join(Dataset, Dataset.id == Transformation.dataset_id)
             .filter(
+                Dataset.deleted_at.is_(None),
                 or_(
                     and_(Transformation.input_path.in_(spellings),
                          or_(historical_reference, Transformation.status.in_({"pending", "processing"}))),
@@ -239,6 +241,8 @@ class ArtifactService:
             return True
         return bool(
             db.query(Report.id)
+            .join(Dataset, Dataset.id == Report.dataset_id)
+            .filter(Dataset.deleted_at.is_(None))
             .filter(or_(
                 and_(Report.file_path.in_(spellings), Report.status == "completed"),
                 and_(Report.snapshot_path.in_(spellings), Report.status.in_({"queued", "processing"})),

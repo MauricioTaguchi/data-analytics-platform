@@ -2,9 +2,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import jwt
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from jwt import InvalidTokenError
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -18,7 +18,7 @@ from app.schemas.auth import (
     PasswordResetResponse, RefreshRequest, RegisterRequest, TokenResponse,
 )
 from app.services.password_reset_service import (
-    INVALID_RESET_MESSAGE, RESET_REQUEST_MESSAGE, confirm_password_reset, notify_password_changed, request_password_reset,
+    INVALID_RESET_MESSAGE, RESET_REQUEST_MESSAGE, confirm_password_reset, request_password_reset,
 )
 
 router = APIRouter()
@@ -75,19 +75,22 @@ def account(user: User = Depends(get_current_user)):
 
 
 @router.post("/password-reset/request", response_model=PasswordResetResponse, status_code=202)
-def request_reset(payload: PasswordResetRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(request_password_reset, str(payload.email))
+def request_reset(payload: PasswordResetRequest, db: Session = Depends(get_db)):
+    try:
+        request_password_reset(db, str(payload.email))
+    except (SQLAlchemyError, RuntimeError):
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Password recovery is temporarily unavailable.") from None
     return {"message": RESET_REQUEST_MESSAGE}
 
 
 @router.post("/password-reset/confirm", status_code=204)
-def confirm_reset(payload: PasswordResetConfirm, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def confirm_reset(payload: PasswordResetConfirm, db: Session = Depends(get_db)):
     try:
-        recipient = confirm_password_reset(db, payload.token, payload.new_password)
+        confirm_password_reset(db, payload.token, payload.new_password)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=INVALID_RESET_MESSAGE) from exc
-    background_tasks.add_task(notify_password_changed, recipient)
 
 
 def decode_refresh(raw_token: str) -> dict:

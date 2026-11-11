@@ -22,6 +22,8 @@ from app.api.v1.routes import auth as auth_routes
 from app.core.security import ALGORITHM
 from app.db.session import SessionLocal
 from app.models.password_reset import PasswordResetToken
+from app.models.password_reset_delivery import PasswordResetDelivery
+from app.services.recovery_delivery_service import dispatch_recovery_mail
 from app.models.session import RefreshSession
 from app.models.user import User
 from app.services import password_reset_service as recovery
@@ -49,11 +51,15 @@ def register(client, *, email=None):
 
 
 def request_link(client, email):
-    return client.post("/api/v1/auth/password-reset/request", json={"email": email})
+    response = client.post("/api/v1/auth/password-reset/request", json={"email": email})
+    dispatch_recovery_mail()
+    return response
 
 
 def confirm(client, token, password=NEW_PASSWORD):
-    return client.post("/api/v1/auth/password-reset/confirm", json={"token": token, "new_password": password})
+    response = client.post("/api/v1/auth/password-reset/confirm", json={"token": token, "new_password": password})
+    dispatch_recovery_mail()
+    return response
 
 
 def test_request_is_uniform_for_existing_unknown_and_inactive_accounts(client, delivery):
@@ -123,7 +129,7 @@ def test_expired_undelivered_used_and_unknown_tokens_have_one_error(client, deli
     assert client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).status_code == 200
 
 
-def test_delivery_failure_returns_uniform_response_and_invalidates_link(client, delivery, monkeypatch, caplog):
+def test_delivery_failure_returns_uniform_response_and_keeps_undelivered_link_unusable(client, delivery, monkeypatch, caplog):
     email, original = register(client)
     attempted = []
     def fail_delivery(recipient, token):
@@ -138,7 +144,8 @@ def test_delivery_failure_returns_uniform_response_and_invalidates_link(client, 
     assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {original['access_token']}"}).status_code == 200
     with SessionLocal() as db:
         record = db.query(PasswordResetToken).one()
-        assert record.used_at is not None and record.delivered_at is None
+        assert record.used_at is None and record.delivered_at is None
+        assert db.query(PasswordResetDelivery).one().state == "pending"
 
 
 def test_missing_delivery_configuration_does_not_issue_token(client, delivery, monkeypatch):

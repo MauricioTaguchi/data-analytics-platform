@@ -155,6 +155,9 @@ pnpm test
 pnpm build
 pnpm exec playwright install chromium
 pnpm test:e2e
+# Optional focused Firefox/WebKit checks (also run in CI):
+pnpm exec playwright install firefox webkit
+PLAYWRIGHT_CROSS_BROWSER=1 pnpm test:e2e
 ```
 
 | Validation layer | What it verifies |
@@ -162,10 +165,12 @@ pnpm test:e2e
 | Backend tests | Operation contracts, data quality, immutable source data, publication, idempotency, quotas, and API behavior. |
 | PostgreSQL tests | Locking and concurrency behavior against a real database in CI. |
 | Process integration | API restart, broker interruption, duplicate delivery, worker death after rename, corrupt snapshots, and direct-SQL audit guards after real migrations. |
-| Frontend and browser tests | Request recovery, preview pagination and missing-value accuracy, keyboard focus, persistent themes, and desktop/mobile workflows, including a live upload-to-undo journey. |
+| Frontend and browser tests | Request recovery, preview pagination and missing-value accuracy, keyboard focus, deletion confirmations, persistent themes, desktop/mobile workflows and focused Firefox/WebKit checks, including a live upload-to-undo journey. |
 | Repository checks | Migrations, lint, type checks, backend and targeted frontend coverage gates, dependency audits/review, and CodeQL. |
 
 The fast backend suite uses eager task execution. The process suite requires disposable PostgreSQL and Redis services and must be run explicitly; see [Real process integration](CONTRIBUTING.md#real-process-integration). A skipped process suite does not verify recovery. Coverage thresholds are quality gates, not capacity benchmarks. Run the reproducible [benchmark procedure](docs/BENCHMARKS.md) and the isolated [backup/restore drill](docs/DISASTER_RECOVERY.md) before making capacity or recovery claims. CI badges reflect the branch actually checked; validation of a new change must be reported from its own workflow run.
+
+Independent human security review, unassisted user sessions, actual screen-reader use and physical-phone checks remain pending. The [human validation packet](docs/VALIDATION_SESSIONS.md) provides consent, scope, tasks and measurement criteria for local sessions without paid hosting. Prepared instructions are not completed validation.
 
 ## Core API workflow
 
@@ -176,6 +181,8 @@ All dataset and job operations below enforce ownership. Interactive request and 
 | Upload and enqueue import | `POST /api/v1/datasets/project/{project_id}` |
 | Inspect progress and result | `GET /api/v1/datasets/jobs/{task_id}` |
 | Cancel an owned job | `DELETE /api/v1/datasets/jobs/{task_id}` |
+| Remove a dataset or project | `DELETE /api/v1/lifecycle/datasets/{id}` or `/api/v1/lifecycle/projects/{id}` |
+| Close an account with password confirmation | `DELETE /api/v1/lifecycle/account` |
 | Read a paginated preview | `GET /api/v1/datasets/{dataset_id}/preview` |
 | Enqueue profiling | `POST /api/v1/datasets/{dataset_id}/profile` |
 | Preview a transformation | `POST /api/v1/datasets/{dataset_id}/transform/preview` |

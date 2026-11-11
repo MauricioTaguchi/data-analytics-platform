@@ -31,7 +31,7 @@ def list_projects(
 ):
     return (
         db.query(Project)
-        .filter(Project.owner_id == user.id)
+        .filter(Project.owner_id == user.id, Project.deleted_at.is_(None))
         .order_by(Project.created_at.desc())
         .all()
     )
@@ -44,7 +44,7 @@ def get_project(
 ):
     project = (
         db.query(Project)
-        .filter(Project.id == project_id, Project.owner_id == user.id)
+        .filter(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
         .first()
     )
     if not project:

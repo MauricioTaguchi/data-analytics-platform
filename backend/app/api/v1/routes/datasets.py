@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_current_user
 from app.core.config import settings
@@ -83,7 +84,7 @@ def owned_dataset(db: Session, dataset_id: int, owner_id: int) -> Dataset:
         .filter(
             Dataset.id == dataset_id,
             Dataset.deleted_at.is_(None),
-            Project.owner_id == owner_id,
+            Project.owner_id == owner_id, Project.deleted_at.is_(None),
         )
         .first()
     )
@@ -181,6 +182,12 @@ async def upload_dataset(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Validate the parent while authenticated admission holds the owner lock,
+    # before reserving a job or staging bytes for a removed/foreign project.
+    try:
+        DatasetService.ensure_project(db, project_id, user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Project not found.") from exc
     task_id = resolve_task_id(requested_task_id)
     existing = JobService.owned(db, task_id, user.id)
     if existing:
@@ -197,6 +204,11 @@ async def upload_dataset(
                 detail="The upload associated with X-Task-ID is still being staged.",
                 headers={"Retry-After": "1"},
             )
+        prior_dataset = db.get(Dataset, existing.dataset_id)
+        prior_project = db.get(Project, prior_dataset.project_id) if prior_dataset else None
+        if (not prior_dataset or prior_dataset.deleted_at is not None or not prior_project
+                or prior_project.deleted_at is not None or prior_project.id != project_id):
+            raise HTTPException(status_code=409, detail="X-Task-ID is already in use. Start a new upload.")
         return {
             "dataset_id": existing.dataset_id,
             "task_id": existing.task_id,
@@ -213,6 +225,9 @@ async def upload_dataset(
         )
         reservation.stage = "uploading"
         db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="X-Task-ID is already in use. Start a new upload.") from exc
     except JobCapacityExceeded as exc:
         db.rollback()
         raise HTTPException(
@@ -336,7 +351,7 @@ def start_profile(
     dataset = (
         db.query(Dataset)
         .join(Project, Project.id == Dataset.project_id)
-        .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None), Project.owner_id == user.id)
+        .filter(Dataset.id == dataset_id, Dataset.deleted_at.is_(None), Project.owner_id == user.id, Project.deleted_at.is_(None))
         .execution_options(populate_existing=True)
         .with_for_update(of=Dataset)
         .first()
@@ -422,6 +437,14 @@ def get_job_status(
         if archived is not None:
             return archived
         raise HTTPException(status_code=404, detail="Job not found.")
+    if job.dataset_id is not None:
+        dataset = db.get(Dataset, job.dataset_id)
+        project = db.get(Project, dataset.project_id) if dataset else None
+        # A cancelled import already used deleted_at before lifecycle removal;
+        # preserve its terminal cancellation receipt, never removed dataset data.
+        if (not dataset or not project or project.deleted_at is not None
+                or (dataset.deleted_at is not None and dataset.status != "cancelled")):
+            raise HTTPException(status_code=404, detail="Job not found.")
     return {
         "task_id": task_id,
         "status": job.status,
