@@ -244,6 +244,23 @@ jobs:
         run: |
           if [ -f "$DATAFLOW_COMPOSE_ENV_FILE" ]; then
             docker compose --env-file "$DATAFLOW_COMPOSE_ENV_FILE" -f docker-compose.production.yml logs --no-color --tail 60 || true
+            python - <<'PY'
+          import json
+          import os
+          import subprocess
+          command = ['docker', 'compose', '--env-file', os.environ['DATAFLOW_COMPOSE_ENV_FILE'], '-f', 'docker-compose.production.yml']
+          for service in ('db', 'redis', 'api', 'worker', 'interactive-worker', 'scheduler', 'web', 'proxy'):
+              result = subprocess.run([*command, 'ps', '-aq', service], capture_output=True, text=True, timeout=10)
+              for identity in result.stdout.splitlines()[:1]:
+                  health = subprocess.run(['docker', 'inspect', '--format', '{{json .State.Health}}', identity],
+                                          capture_output=True, text=True, timeout=10)
+                  if health.returncode or health.stdout.strip() in {'', 'null'}:
+                      continue
+                  state = json.loads(health.stdout)
+                  attempts = [{'exit_code': entry.get('ExitCode'), 'output': entry.get('Output', '')[-800:]}
+                              for entry in state.get('Log', [])[-3:]]
+                  print('COMPOSE_HEALTH ' + json.dumps({'service': service, 'status': state.get('Status'), 'attempts': attempts}))
+          PY
           fi
           if [ -f "$DATAFLOW_SMOKE_ROOT/evidence/backup-run.log" ]; then
             tail -n 60 "$DATAFLOW_SMOKE_ROOT/evidence/backup-run.log"
