@@ -1,0 +1,201 @@
+# Standalone deployment. Never merge this file with the development Compose file.
+name: ${DATAFLOW_COMPOSE_PROJECT_NAME:-dataflow-production}
+
+x-runtime: &runtime
+  build: ./backend
+  init: true
+  restart: unless-stopped
+  env_file: ["${DATAFLOW_CONFIG_DIR:?Set the external configuration directory}/runtime.env"]
+  entrypoint: [/bin/sh, /opt/dataflow-production/run-runtime.sh]
+  volumes:
+    - ./ops/production:/opt/dataflow-production:ro
+    - analytics_uploads:/app/data/uploads
+    - analytics_reports:/app/data/reports
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  pids_limit: 256
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  networks: [data]
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ["${DATAFLOW_CONFIG_DIR:?}/db.env"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U dataflow_owner -d analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 1g
+    cpus: 1.0
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file: ["${DATAFLOW_CONFIG_DIR:?}/redis.env"]
+    entrypoint: [/bin/sh, /opt/dataflow-production/start-redis.sh]
+    volumes:
+      - ./ops/production:/opt/dataflow-production:ro
+      - redis_data:/data
+    tmpfs: [/tmp:size=16m,mode=1777]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 512m
+    cpus: 0.5
+
+  bootstrap:
+    profiles: [tools]
+    build: ./backend
+    init: true
+    restart: "no"
+    env_file: ["${DATAFLOW_CONFIG_DIR:?}/migration.env"]
+    environment:
+      PYTHONPATH: /app
+    volumes: [./ops/production:/opt/dataflow-production:ro]
+    command: [python, /opt/dataflow-production/bootstrap.py]
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  api:
+    <<: *runtime
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers]
+    networks: [data, proxy_api, outbound]
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  worker:
+    <<: *runtime
+    command: [celery, -A, app.worker.celery_app, worker, --loglevel=info, --queues, bulk, --concurrency, "1"]
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 240s
+    healthcheck:
+      test: [CMD-SHELL, 'celery -A app.worker.celery_app inspect ping --destination "celery@$$HOSTNAME" --timeout 5']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  interactive-worker:
+    <<: *runtime
+    command: [celery, -A, app.worker.celery_app, worker, --loglevel=info, --queues, interactive, --concurrency, "1"]
+    mem_limit: 1g
+    cpus: 1.0
+    stop_grace_period: 240s
+    healthcheck:
+      test: [CMD-SHELL, 'celery -A app.worker.celery_app inspect ping --destination "celery@$$HOSTNAME" --timeout 5']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  scheduler:
+    <<: *runtime
+    command: [python, -m, app.scheduler]
+    mem_limit: 512m
+    cpus: 0.5
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, python, -m, app.scheduler, --healthcheck]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/v1
+    restart: unless-stopped
+    networks: [frontend]
+    mem_limit: 128m
+    cpus: 0.25
+
+  proxy:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    environment:
+      DATAFLOW_PUBLIC_HOST: ${DATAFLOW_PUBLIC_HOST:?Set the verified application hostname}
+    ports: ["80:8080", "443:8443"]
+    volumes:
+      - ./ops/production/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ${DATAFLOW_TLS_CERT_FILE:?Supply a certificate for the application hostname}:/run/tls/certificate.pem:ro
+      - ${DATAFLOW_TLS_KEY_FILE:?Supply the private TLS key}:/run/tls/private-key.pem:ro
+    networks:
+      ingress:
+      frontend:
+      proxy_api:
+        ipv4_address: ${DATAFLOW_PROXY_IP:?Set the exact trusted proxy address}
+    depends_on:
+      api: {condition: service_healthy}
+      web: {condition: service_healthy}
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:size=1m,mode=0755
+      - /var/cache/nginx:size=64m,mode=0755
+      - /var/run:size=1m,mode=0755
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # The master reads a private host-owned TLS key before dropping worker UID.
+    cap_add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE]
+    mem_limit: 128m
+    cpus: 0.5
+
+  recovery:
+    profiles: [recovery]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.recovery
+    init: true
+    restart: "no"
+    env_file: ["${DATAFLOW_CONFIG_DIR:?}/recovery.env"]
+    volumes:
+      - analytics_uploads:/app/data/uploads:ro
+      - analytics_reports:/app/data/reports:ro
+      - ${DATAFLOW_BACKUP_DIR:?Set the private backup destination}:/backups
+    networks: [data, outbound]
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1777]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+
+networks:
+  data:
+    internal: true
+  proxy_api:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${DATAFLOW_PROXY_SUBNET:?Set a private proxy network without host conflicts}
+  frontend:
+    internal: true
+  ingress:
+  outbound:
+
+volumes:
+  postgres_data:
+  redis_data:
+  analytics_uploads:
+  analytics_reports:

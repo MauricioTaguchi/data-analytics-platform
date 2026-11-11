@@ -1,7 +1,7 @@
 """A real PostgreSQL dump/restore drill in two disposable, uniquely named databases.
 
 Run with RECOVERY_TEST_ADMIN_URL. The supplied database is never modified; its
-role must create databases. Only databases created by this fixture are dropped.
+role must create databases and roles. Only fixture-created resources are dropped.
 """
 
 from contextlib import closing
@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from time import monotonic, sleep
 from uuid import uuid4
 
 import psycopg2
@@ -19,7 +20,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from app.operations.backup import (
-    RecoveryError, _connection_parameters, create_backup, sha256_file, verify_archive,
+    RecoveryError, _assert_quiescent, _connection_parameters, create_backup, sha256_file, verify_archive,
 )
 
 
@@ -127,3 +128,63 @@ def test_dump_restore_retains_snapshot_bytes_history_and_identity(tmp_path, sour
         destination = Path(evidence_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(evidence, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def test_quiescence_rejects_other_roles_when_activity_details_are_hidden(source_database):
+    """A non-owner capture identity must not mistake hidden activity for no clients."""
+    source_url, admin_url, _ = source_database
+    source_parameters = _connection_parameters(source_url)
+    roles = [f"dataflow_capture_test_{uuid4().hex}", f"dataflow_client_test_{uuid4().hex}"]
+    password = uuid4().hex
+    created = []
+    try:
+        with closing(psycopg2.connect(**_connection_parameters(admin_url))) as admin:
+            admin.autocommit = True
+            with admin.cursor() as cursor:
+                for role in roles:
+                    cursor.execute(sql.SQL(
+                        "CREATE ROLE {} LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT"
+                    ).format(sql.Identifier(role)), (password,))
+                    created.append(role)
+        with closing(psycopg2.connect(**source_parameters)) as source:
+            source.autocommit = True
+            with source.cursor() as cursor:
+                cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(roles[0])))
+                cursor.execute(sql.SQL("GRANT SELECT ON public.job_records TO {}").format(sql.Identifier(roles[0])))
+        capture_parameters = {**source_parameters, "user": roles[0], "password": password}
+        client_parameters = {**source_parameters, "user": roles[1], "password": password}
+        with closing(psycopg2.connect(**capture_parameters)) as capture:
+            capture.autocommit = True
+            with capture.cursor() as cursor:
+                cursor.execute("SELECT pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')")
+                assert cursor.fetchone() == (False,)
+                with closing(psycopg2.connect(**client_parameters)) as client:
+                    with client.cursor() as client_cursor:
+                        client_cursor.execute("SELECT pg_backend_pid()")
+                        client_pid = client_cursor.fetchone()[0]
+                    cursor.execute("SELECT backend_type FROM pg_stat_activity WHERE pid = %s", (client_pid,))
+                    assert cursor.fetchone() == (None,)
+                    with pytest.raises(RecoveryError, match="Stop API"):
+                        _assert_quiescent(cursor)
+                # A socket close can return before PostgreSQL removes its backend.
+                deadline = monotonic() + 3
+                while True:
+                    try:
+                        _assert_quiescent(cursor)
+                        break
+                    except RecoveryError:
+                        if monotonic() >= deadline:
+                            raise
+                        sleep(0.02)
+    finally:
+        if created:
+            with closing(psycopg2.connect(**source_parameters)) as source:
+                source.autocommit = True
+                with source.cursor() as cursor:
+                    for role in created:
+                        cursor.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+            with closing(psycopg2.connect(**_connection_parameters(admin_url))) as admin:
+                admin.autocommit = True
+                with admin.cursor() as cursor:
+                    for role in created:
+                        cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
