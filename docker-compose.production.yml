@@ -71,7 +71,11 @@ services:
   api:
     <<: *runtime
     command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers]
-    networks: [data, proxy_api, outbound]
+    networks:
+      data:
+      proxy_api:
+        ipv4_address: ${DATAFLOW_API_PROXY_IP:?Set a separate API address on the proxy network}
+      outbound:
     mem_limit: 2g
     cpus: 2.0
     stop_grace_period: 30s

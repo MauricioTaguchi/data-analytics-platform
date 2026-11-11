@@ -66,6 +66,17 @@ def test_configuration_rejects_unsafe_proxy_changes(settings):
         configure.check(settings.directory)
 
 
+def test_configuration_reserves_distinct_api_and_proxy_addresses(settings):
+    configure.create(settings)
+    compose = configure.read_env(settings.directory / "compose.env")
+    assert compose["DATAFLOW_API_PROXY_IP"] == "172.30.83.3"
+    assert configure.api_proxy_address("172.30.83.0/29", "172.30.83.3") == "172.30.83.2"
+    path = settings.directory / "compose.env"
+    path.write_text(path.read_text().replace("DATAFLOW_API_PROXY_IP=172.30.83.3", "DATAFLOW_API_PROXY_IP=172.30.83.2"))
+    with pytest.raises(ValueError, match="distinct private addresses"):
+        configure.check(settings.directory)
+
+
 @pytest.mark.parametrize("subnet,peer", [("127.0.0.0/24", "127.0.0.2"), ("169.254.0.0/24", "169.254.0.2"),
                                        ("172.30.83.0/30", "172.30.83.2"), ("172.30.83.0/24", "172.30.83.1")])
 def test_unusable_proxy_networks_are_rejected(subnet, peer):

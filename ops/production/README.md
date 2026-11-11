@@ -2,7 +2,7 @@
 
 This path is for an operator-controlled Linux host with Docker Compose v2, an owned application hostname and a valid TLS certificate. It is separate from `docker-compose.yml`; **never combine the two files**. Adding or testing this configuration does not provision a host or establish production readiness. The public portfolio remains a static demonstration.
 
-Only the TLS proxy publishes host ports (80 and 443). PostgreSQL, authenticated Redis, the API and the frontend communicate over private Docker networks. API egress supports SMTP; recovery egress supports independent backup storage. The proxy terminates TLS directly, with an exact private address trusted by Uvicorn. An additional CDN or load balancer needs a separately reviewed proxy policy.
+Only the TLS proxy publishes host ports (80 and 443). PostgreSQL, authenticated Redis, the API and the frontend communicate over private Docker networks. API egress supports SMTP; recovery egress supports independent backup storage. API and proxy receive distinct explicit addresses on their shared network so startup order cannot allocate the proxy's address to the API. Uvicorn trusts only the proxy's exact address. The proxy terminates TLS directly; an additional CDN or load balancer needs a separately reviewed proxy policy.
 
 ## Prepare an isolated configuration
 

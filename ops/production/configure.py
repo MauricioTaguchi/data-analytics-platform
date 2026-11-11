@@ -80,6 +80,13 @@ def validate_network(subnet: str, peer: str) -> None:
         raise ValueError("Use an RFC1918 IPv4 /24 through /29 network and a non-gateway proxy address in it")
 
 
+def api_proxy_address(subnet: str, proxy: str) -> str:
+    validate_network(subnet, proxy)
+    network = ipaddress.ip_network(subnet, strict=True)
+    reserved = {network.network_address + 1, ipaddress.ip_address(proxy)}
+    return str(next(address for address in network.hosts() if address not in reserved))
+
+
 def write_env(path: Path, values: dict[str, str]) -> None:
     if any("\n" in value or "\r" in value or "$" in value for value in values.values()):
         raise ValueError("Generated configuration cannot contain multiline or interpolated values")
@@ -99,6 +106,9 @@ def check(directory: Path) -> dict:
     host = compose["DATAFLOW_PUBLIC_HOST"]
     validate_hostname(host, compose.get("DATAFLOW_TEST_HOSTNAME") == "true")
     validate_network(compose["DATAFLOW_PROXY_SUBNET"], compose["DATAFLOW_PROXY_IP"])
+    validate_network(compose["DATAFLOW_PROXY_SUBNET"], compose["DATAFLOW_API_PROXY_IP"])
+    if compose["DATAFLOW_API_PROXY_IP"] == compose["DATAFLOW_PROXY_IP"]:
+        raise ValueError("API and proxy must use distinct private addresses")
     validate_tls(Path(compose["DATAFLOW_TLS_CERT_FILE"]), Path(compose["DATAFLOW_TLS_KEY_FILE"]), host)
     if compose["DATAFLOW_CONFIG_DIR"] != str(directory.resolve()):
         raise ValueError("Configuration directory does not match its Compose configuration")
@@ -169,6 +179,7 @@ def create(args) -> dict:
         "DATAFLOW_CONFIG_DIR": str(directory), "DATAFLOW_PUBLIC_HOST": args.hostname,
         "DATAFLOW_TLS_CERT_FILE": str(args.tls_cert), "DATAFLOW_TLS_KEY_FILE": str(args.tls_key),
         "DATAFLOW_PROXY_SUBNET": args.proxy_subnet, "DATAFLOW_PROXY_IP": args.proxy_ip,
+        "DATAFLOW_API_PROXY_IP": api_proxy_address(args.proxy_subnet, args.proxy_ip),
         "DATAFLOW_COMPOSE_PROJECT_NAME": "dataflow-production", "DATAFLOW_BACKUP_DIR": str(backups),
         "DATAFLOW_TEST_HOSTNAME": str(args.allow_test_hostname).lower(),
     })
