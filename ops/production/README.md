@@ -54,6 +54,13 @@ Bootstrap applies migrations and grants explicitly. It is repeatable for this de
 
 For an upgrade, block admission, drain/cancel jobs and take a verified coordinated backup with the old release. Stop API, both workers and scheduler before running bootstrap with the new release. Rebuild/start the new services and verify the complete application journey. Do not apply migrations while the old writers are running. Never use `down --volumes` on an actual deployment; that command destroys its data.
 
+Nginx resolves its upstream container addresses when it starts. After replacing the API or frontend container, explicitly recreate the proxy so it resolves their current private addresses:
+
+```bash
+sudo docker compose --env-file /etc/dataflow-production/compose.env \
+  -f docker-compose.production.yml up -d --force-recreate proxy
+```
+
 The included CPU/memory limits are starting limits, not a measured production capacity guarantee. Measure the complete stack on the chosen host with representative data, leave capacity for PostgreSQL/Redis/filesystem/OS, and validate shutdown deadlines for the workload before allowing important data.
 
 ## Complete services before accepting important data

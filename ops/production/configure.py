@@ -57,8 +57,13 @@ def validate_tls(cert: Path, key: Path, host: str) -> None:
         raise ValueError("TLS inputs must be absolute regular file paths without symlinks")
     private_file(key)
     ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert, key)
-    for arguments in (["-checkhost", host], ["-checkend", "86400"]):
-        result = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", *arguments],
+    # Some OpenSSL versions print a failed x509 -checkhost result but still exit
+    # zero. verify has a failing status for mismatches. Trust this supplied leaf
+    # only for structural validation; public CA trust is an operator check.
+    commands = (["openssl", "verify", "-trusted", str(cert), "-partial_chain", "-verify_hostname", host, str(cert)],
+                ["openssl", "x509", "-in", str(cert), "-noout", "-checkend", "86400"])
+    for command in commands:
+        result = subprocess.run(command,
                                 capture_output=True, timeout=10)
         if result.returncode:
             raise ValueError("TLS certificate must cover the hostname and remain valid for at least one day")

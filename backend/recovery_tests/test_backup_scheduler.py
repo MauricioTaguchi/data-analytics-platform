@@ -44,9 +44,13 @@ if "create" in args:
     configuration.write_text("# Protected operator configuration\n", encoding="utf-8")
     configuration.chmod(0o600)
     log = tmp_path / "commands.jsonl"
-    environment = {**os.environ, "PATH": f"{commands}:{os.environ['PATH']}",
+    # The production smoke workflow supplies real Compose settings. This fake
+    # Docker fixture must be independent of every caller's deployment settings.
+    inherited = {key: value for key, value in os.environ.items() if not key.startswith("DATAFLOW_")}
+    environment = {**inherited, "PATH": f"{commands}:{os.environ['PATH']}",
                    "DATAFLOW_PROJECT_DIR": str(tmp_path), "DATAFLOW_BACKUP_DIR": str(backups),
                    "DATAFLOW_BACKUP_ENV_FILE": str(configuration), "DATAFLOW_BACKUP_LOCK_FILE": str(tmp_path / "lock"),
+                   "DATAFLOW_BACKUP_REQUIRE_REMOTE": "true",
                    "COMMAND_LOG": str(log), "DATAFLOW_BACKUP_S3_BUCKET": "test-private-backups"}
 
     def run(fail_at="", **overrides):
