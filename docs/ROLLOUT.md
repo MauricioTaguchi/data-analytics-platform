@@ -2,6 +2,8 @@
 
 No active deployment, external recipient, provider charge, or production recovery result is established by this repository. Choose one hosting path and validate it before accepting important data. Both paths preserve the single-node local-storage constraint.
 
+Use the [live acceptance checklist](LIVE_ACCEPTANCE.md) to record the selected host, approved external services, deployed journeys, independent recovery, real notifications, capacity evidence and human review. Its pending gates must be completed on the selected environment; repository checks do not fill them automatically.
+
 ## Hosting options and cost inputs
 
 | Path | What is prepared | Remaining operational decision |

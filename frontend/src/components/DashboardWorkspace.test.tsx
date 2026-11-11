@@ -254,4 +254,81 @@ describe("DashboardWorkspace", () => {
     expect(table.rows).toHaveLength(100);
     expect(table).toMatchObject({ total_count: 105, returned_count: 100, truncated: true });
   });
+
+  it("provides the aggregated chart values with semantic headers and available precision", () => {
+    const data = buildLocalChartData([{ category: "A", total: 1.23456 }, { category: "A", total: 2 }, { category: "B", total: -4 }], "category", "total", "sum");
+    const markup = renderToStaticMarkup(<ChartVisual data={data} />);
+    const table = markup.slice(markup.indexOf("<table>"));
+    expect(markup).toContain("<summary>View chart values</summary>");
+    expect(markup).toContain("aria-details=");
+    expect(table).toContain("Bar chart values: sum of total by category");
+    expect(table).toContain('<th scope="col">category</th><th scope="col">sum of total</th>');
+    expect(table).toContain('<th scope="row">A</th><td>3.23456</td>');
+    expect(table).toContain('<th scope="row">B</th><td>-4</td>');
+    expect(table).not.toContain("<td>1.23456</td>");
+    expect(table).not.toContain("<tfoot>");
+  });
+
+  it.each(["bar", "line"] as const)("preserves unavailable values and the exact %s display limit in the table", (type) => {
+    const limit = type === "bar" ? 12 : 24;
+    const data = { labels: Array.from({ length: 30 }, (_, index) => `Item ${index}`), values: [null, ...Array.from({ length: 29 }, (_, index) => index)], rows: [], aggregation: "mean" as const, total_count: 200, truncated: true };
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type={type} />);
+    const body = markup.split("<tbody>")[1].split("</tbody>")[0];
+    expect(body.match(/<tr>/g)).toHaveLength(limit);
+    expect(body).toContain('<th scope="row">Item 0</th><td>Unavailable</td>');
+    expect(body).toContain('<th scope="row">Item 1</th><td>0</td>');
+    expect(body).not.toContain(`Item ${limit}</th>`);
+    expect(markup).toContain(`Showing the first ${limit} of 200 categories`);
+    expect(markup).not.toContain("<tfoot>");
+  });
+
+  it("makes the actual combined pie slices, percentages and complete total available as a table", () => {
+    const data = { labels: [...Array.from({ length: 19 }, (_, index) => `Category ${index + 1}`), "Other"], values: [...Array(19).fill(1), 81], rows: [], total_count: 100, grouped_count: 81, aggregation: "count" as const, value_column: null };
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="pie" />);
+    const table = markup.slice(markup.indexOf("<table>"));
+    expect(table).toContain("Count of source rows");
+    expect(table).toContain('<th scope="row">Other (93 categories)</th><td>93</td><td>93.0%</td>');
+    expect(table).toContain('<th scope="row">Total</th><td>100</td><td>100%</td>');
+    expect(table).not.toContain("Category 8</th>");
+    expect(table.match(/<th scope="row">Category /g)).toHaveLength(7);
+  });
+
+  it("keeps repeated scatter coordinates paired in the table and excludes invalid observations", () => {
+    const data = { labels: [1, "bad", 1, 100], values: [10, 900, 20, null], rows: [], group_column: "distance", value_column: "cost" };
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="scatter" />);
+    const table = markup.slice(markup.indexOf("<table>"));
+    expect(table).toContain('<th scope="col">X: distance</th><th scope="col">Y: cost</th>');
+    expect(table).toContain('<th scope="row">1</th><td>10</td>');
+    expect(table).toContain('<th scope="row">1</th><td>20</td>');
+    expect(table).not.toContain("900");
+    expect(table).not.toContain("100</th>");
+    expect(markup).toContain("2 rows without a finite numeric X/Y pair were excluded");
+  });
+
+  it("bounds the scatter alternative to the same 100 plotted pairs", () => {
+    const labels = Array.from({ length: 105 }, (_, index) => index);
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels, values: labels, rows: [] }} type="scatter" />);
+    const body = markup.split("<tbody>")[1].split("</tbody>")[0];
+    expect(body.match(/<tr>/g)).toHaveLength(100);
+    expect(body).toContain('<th scope="row">99</th><td>99</td>');
+    expect(body).not.toContain('<th scope="row">100</th>');
+    expect(markup).toContain("Showing the first 100 of 105 numeric pairs");
+  });
+
+  it("provides histogram intervals and counts without treating source rows as chart values", () => {
+    const data = buildLocalChartData(rows, "category", "total", "sum", "histogram");
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="histogram" />);
+    const table = markup.slice(markup.indexOf("<table>"));
+    expect(table).toContain("Histogram chart values: Count of recorded values by Interval of total");
+    expect(table.match(/scope="row"/g)).toHaveLength(10);
+    expect(table).not.toContain("Computers");
+  });
+
+  it("escapes chart labels and does not offer a misleading table when a chart is unavailable", () => {
+    const label = '<img src="x" onerror="alert(1)">';
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: [label], values: [1], rows: [] }} />);
+    expect(markup).not.toContain("<img");
+    expect(markup).toContain("&lt;img");
+    expect(renderToStaticMarkup(<ChartVisual data={{ labels: ["A"], values: [-1], rows: [] }} type="pie" />)).not.toContain("<details");
+  });
 });
