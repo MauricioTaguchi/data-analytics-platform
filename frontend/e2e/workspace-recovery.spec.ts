@@ -44,6 +44,7 @@ test("project switching ignores a late dataset catalogue response", async ({ pag
   });
   await connect(page);
   await expect.poll(() => firstStarted).toBe(true);
+  await expect(page.getByRole("region", { name: "Saved workspace", exact: true })).toBeVisible();
   await page.getByLabel("Project", { exact: true }).selectOption("2");
   const picker = page.getByLabel("Saved dataset", { exact: true });
   await expect(picker).toBeEnabled();
@@ -71,7 +72,7 @@ for (const [status, label] of [["FAILURE", "Failed"], ["CANCELLED", "Cancelled"]
     await connect(page);
     await page.getByLabel("Upload dataset file").setInputFiles({ name: "orders.csv", mimeType: "text/csv", buffer: Buffer.from("amount\n25\n") });
     const card = page.getByRole("article", { name: "Processing status" });
-    await expect(card.getByText(label, { exact: true })).toBeVisible();
+    await expect(card.locator(".processing-badge")).toHaveText(label);
     await expect(card).not.toContainText("100%");
     await expect(card.getByText("Complete", { exact: true })).toHaveCount(0);
     await expect(card.getByRole("progressbar")).toHaveCount(0);

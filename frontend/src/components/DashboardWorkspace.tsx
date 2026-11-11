@@ -42,7 +42,8 @@ export class InteractiveRequestFence {
 
 function numericValuesFor(rows: DataRow[], column: string) {
   return rows.flatMap((row) => {
-    const value = finiteNumber(row[column]);
+    const raw = row[column];
+    const value = finiteNumber(typeof raw === "boolean" ? Number(raw) : raw);
     return value === null ? [] : [value];
   });
 }

@@ -36,10 +36,10 @@ jobs:
           chmod 444 "$DATAFLOW_METRICS_TOKEN_FILE"
           docker compose -f docker-compose.yml -f ops/docker-compose.monitoring.yml --profile monitoring config --quiet
           docker run --rm --entrypoint promtool \
-            -v "$PWD/ops:/etc/prometheus:ro" \
+            -v "$PWD/ops/prometheus.example.yml:/etc/prometheus/prometheus.yml:ro" \
             -v "$PWD/ops/prometheus-alerts.yml:/etc/prometheus/dataflow-alerts.yml:ro" \
             -v "$DATAFLOW_METRICS_TOKEN_FILE:/run/secrets/dataflow_metrics_token:ro" \
-            prom/prometheus:v3.13.5 check config /etc/prometheus/prometheus.example.yml
+            prom/prometheus:v3.13.5 check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint amtool \
             -v "$PWD/ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
             prom/alertmanager:v0.35.0 check-config /etc/alertmanager/alertmanager.yml

@@ -18,8 +18,8 @@ export function WorkspacePicker({ projects, projectId, datasets, datasetId, load
   return <section className="panel workspace-picker" aria-label="Saved workspace">
     <div className="workspace-picker-heading"><div><h2>Saved workspace</h2><p>Open an existing dataset to continue its revision, history, and undo.</p></div><button className="secondary" disabled={busy || loading} onClick={onRefresh}>Refresh list</button></div>
     <div className="field-row">
-      <label>Project<select value={projectId} disabled={busy} onChange={(event) => onProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
-      <label>Saved dataset<select value={datasets.some((dataset) => dataset.id === datasetId) ? datasetId! : ""} disabled={busy || loading || Boolean(error) || datasets.length === 0} onChange={(event) => { if (event.target.value) onDataset(Number(event.target.value)); }}>
+      <label>Project<select aria-label="Project" value={projectId} disabled={busy} onChange={(event) => onProject(Number(event.target.value))}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+      <label>Saved dataset<select aria-label="Saved dataset" value={datasets.some((dataset) => dataset.id === datasetId) ? datasetId! : ""} disabled={busy || loading || Boolean(error) || datasets.length === 0} onChange={(event) => { if (event.target.value) onDataset(Number(event.target.value)); }}>
         <option value="" disabled>{loading ? "Loading saved datasets…" : "Choose a saved dataset"}</option>
         {datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.original_filename} · Revision {dataset.version} · {dataset.status}</option>)}
       </select></label>

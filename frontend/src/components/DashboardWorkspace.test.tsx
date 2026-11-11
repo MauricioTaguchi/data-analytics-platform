@@ -10,6 +10,13 @@ const rows = [
 ];
 
 describe("DashboardWorkspace", () => {
+  it("preserves boolean KPI reductions without accepting boolean scatter coordinates", () => {
+    const flags = [{ x: 1, flag: true }, { x: 2, flag: false }, { x: 3, flag: null }];
+    expect(buildLocalChartData(flags, "x", "flag", "sum", "kpi").values).toEqual([1]);
+    expect(buildLocalChartData(flags, "x", "flag", "count", "kpi").values).toEqual([2]);
+    expect(buildLocalChartData(flags, "x", "flag", "mean", "kpi").values).toEqual([0.5]);
+    expect(buildLocalChartData(flags, "x", "flag", "sum", "scatter")).toMatchObject({ labels: [], values: [], omitted_count: 3 });
+  });
   it("invalidates an in-flight chart build when the project or session changes", () => {
     const fence = new InteractiveRequestFence();
     const buildRequest = fence.begin();
