@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     DATABASE_STATEMENT_TIMEOUT_MS: int = Field(default=30_000, ge=1)
     DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: int = Field(default=60_000, ge=1)
     REDIS_URL: str = "redis://redis:6379/0"
+    CACHE_REDIS_CONNECT_TIMEOUT_SECONDS: float = Field(default=2.0, ge=0.1, le=10.0)
+    CACHE_REDIS_SOCKET_TIMEOUT_SECONDS: float = Field(default=2.0, ge=0.1, le=10.0)
     CELERY_EAGER: bool = False
     UPLOAD_DIR: str = "data/uploads"
     REPORT_DIR: str = "data/reports"

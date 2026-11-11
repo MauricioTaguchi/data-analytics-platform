@@ -174,6 +174,38 @@ export function buildLocalChartData(rows: DataRow[], xColumn: string, yColumn: s
 const CHART_COLORS = ["#155eef", "#0e9384", "#7f56d9", "#f79009", "#d92d20", "#2e90fa", "#12b76a", "#ee46bc"];
 const CHART_NUMBER_FORMAT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
+function chartValueHeading(data: ChartData, type: ChartType) {
+  if (type === "scatter") return `Y: ${data.value_column || "selected Y value"}`;
+  if (type === "histogram") return "Count of recorded values";
+  const operation = data.aggregation || "sum";
+  return operation === "count" && data.value_column === null
+    ? "Count of source rows"
+    : `${operation} of ${data.value_column || "selected measure"}`;
+}
+
+type ChartValueRow = { label: string | number; value: number | null; share?: string };
+
+function ChartValuesTable({ id, data, type, rows, total }: {
+  id: string; data: ChartData; type: ChartType; rows: ChartValueRow[]; total?: number;
+}) {
+  const category = type === "scatter" ? `X: ${data.group_column || "selected X value"}`
+    : type === "histogram" ? `Interval of ${data.value_column || "selected measure"}`
+    : data.group_column || "Category";
+  const measure = chartValueHeading(data, type);
+  const name = `${type[0].toUpperCase()}${type.slice(1)} chart values`;
+  return <details className="chart-values" id={id}>
+    <summary>View chart values</summary>
+    <p>Values match the displayed chart, including its display limits and any combined categories. Numbers retain their available precision. Unavailable values are not zero.</p>
+    {type === "scatter" ? <p>Each row is one displayed X/Y pair. Repeated X values remain separate observations.</p> : null}
+    <table>
+      <caption id={`${id}-caption`}>{name}: {measure}{type === "scatter" ? ` against ${category}` : ` by ${category}`}</caption>
+      <thead><tr><th scope="col">{category}</th><th scope="col">{measure}</th>{type === "pie" ? <th scope="col">Share of total</th> : null}</tr></thead>
+      <tbody>{rows.map((row, index) => <tr key={index}><th scope="row">{String(row.label)}</th><td>{row.value === null ? "Unavailable" : String(row.value)}</td>{type === "pie" ? <td>{row.share}</td> : null}</tr>)}</tbody>
+      {total !== undefined ? <tfoot><tr><th scope="row">Total</th><td>{String(total)}</td><td>100%</td></tr></tfoot> : null}
+    </table>
+  </details>;
+}
+
 function ChartNotice({ children }: { children: ReactNode }) {
   return <p className="chart-notice" style={{ padding: "0 28px", color: "var(--muted)", fontSize: 12 }}>{children}</p>;
 }
@@ -207,6 +239,7 @@ export function ChartMetricSummary({ data, type }: { data: ChartData | null; typ
 }
 
 export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; type?: ChartType }) {
+  const valuesId = useId();
   const numericValues = (data?.labels || []).map((_, index) => finiteNumber(data?.values[index]));
   if (type === "pie" && data?.aggregation && data.aggregation !== "sum" && data.aggregation !== "count") return <div className="empty-state"><strong>Choose an additive measure for a pie</strong><span>Use sum or count. Compare mean, min or max in a bar, line or KPI; they cannot form a meaningful part-to-whole total.</span></div>;
   if (data?.source_row_count === 0) return <div className="empty-state"><strong>No matching rows</strong><span>This chart’s current result contains no source rows.</span></div>;
@@ -238,7 +271,7 @@ export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; ty
       cursor += (value / total) * 100;
       return `${CHART_COLORS[index % CHART_COLORS.length]} ${start}% ${cursor}%`;
     });
-    return <>{categories.length > 8 ? <ChartNotice>All {categoryCount} categories are included. The final {categoryCount - 7} categories are combined as Other.</ChartNotice> : data.grouped_count ? <ChartNotice>All {categoryCount} categories are included; {data.grouped_count} categories are combined as Other.</ChartNotice> : null}<div className="pie-layout" role="img" aria-label="Generated pie chart"><div className="pie-chart" style={{ background: `conic-gradient(${stops.join(",")})` }}><span>{CHART_NUMBER_FORMAT.format(total)}</span></div><div className="pie-legend">{slices.map(({ label, value }, index) => <div key={`${label}-${index}`}><i style={{ background: CHART_COLORS[index % CHART_COLORS.length] }} /><span title={`${label}: ${CHART_NUMBER_FORMAT.format(value)}`}>{label}</span><strong>{((value / total) * 100).toFixed(1)}%</strong></div>)}</div></div></>;
+    return <>{categories.length > 8 ? <ChartNotice>All {categoryCount} categories are included. The final {categoryCount - 7} categories are combined as Other.</ChartNotice> : data.grouped_count ? <ChartNotice>All {categoryCount} categories are included; {data.grouped_count} categories are combined as Other.</ChartNotice> : null}<div className="pie-layout" role="img" aria-label="Generated pie chart" aria-describedby={`${valuesId}-caption`} aria-details={valuesId}><div className="pie-chart" style={{ background: `conic-gradient(${stops.join(",")})` }}><span>{CHART_NUMBER_FORMAT.format(total)}</span></div><div className="pie-legend">{slices.map(({ label, value }, index) => <div key={`${label}-${index}`}><i style={{ background: CHART_COLORS[index % CHART_COLORS.length] }} /><span title={`${label}: ${CHART_NUMBER_FORMAT.format(value)}`}>{label}</span><strong>{((value / total) * 100).toFixed(1)}%</strong></div>)}</div></div><ChartValuesTable id={valuesId} data={data} type={type} rows={slices.map((slice) => ({ ...slice, share: `${((slice.value / total) * 100).toFixed(1)}%` }))} total={total} /></>;
   }
   if (type === "scatter") {
     const pairs = data.labels.flatMap((label, index) => {
@@ -253,7 +286,7 @@ export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; ty
     const yMin = Math.min(...points.map((point) => point.y));
     const yMax = Math.max(...points.map((point) => point.y));
     const omitted = (data.omitted_count ?? 0) + data.labels.length - pairs.length;
-    return <><ChartLimitNotice data={data} shown={points.length} available={pairs.length} unit="numeric pairs" />{omitted ? <ChartNotice>{omitted} rows without a finite numeric X/Y pair were excluded.</ChartNotice> : null}<div className="line-chart" role="img" aria-label="Generated scatter chart"><svg viewBox="0 0 600 260" preserveAspectRatio="none" aria-hidden="true"><path className="line-grid" d="M30 30H570 M30 80H570 M30 130H570 M30 180H570 M30 230H570" />{points.map((point, index) => <circle key={index} cx={xMin === xMax ? 300 : 30 + ((point.x - xMin) / (xMax - xMin)) * 540} cy={yMin === yMax ? 130 : 230 - ((point.y - yMin) / (yMax - yMin)) * 200} r="5"><title>{`X: ${point.x}; Y: ${point.y}`}</title></circle>)}</svg><div><span>X: {CHART_NUMBER_FORMAT.format(xMin)} to {CHART_NUMBER_FORMAT.format(xMax)}</span><span>Y: {CHART_NUMBER_FORMAT.format(yMin)} to {CHART_NUMBER_FORMAT.format(yMax)}</span></div></div></>;
+    return <><ChartLimitNotice data={data} shown={points.length} available={pairs.length} unit="numeric pairs" />{omitted ? <ChartNotice>{omitted} rows without a finite numeric X/Y pair were excluded.</ChartNotice> : null}<div className="line-chart" role="img" aria-label="Generated scatter chart" aria-describedby={`${valuesId}-caption`} aria-details={valuesId}><svg viewBox="0 0 600 260" preserveAspectRatio="none" aria-hidden="true"><path className="line-grid" d="M30 30H570 M30 80H570 M30 130H570 M30 180H570 M30 230H570" />{points.map((point, index) => <circle key={index} cx={xMin === xMax ? 300 : 30 + ((point.x - xMin) / (xMax - xMin)) * 540} cy={yMin === yMax ? 130 : 230 - ((point.y - yMin) / (yMax - yMin)) * 200} r="5"><title>{`X: ${point.x}; Y: ${point.y}`}</title></circle>)}</svg><div><span>X: {CHART_NUMBER_FORMAT.format(xMin)} to {CHART_NUMBER_FORMAT.format(xMax)}</span><span>Y: {CHART_NUMBER_FORMAT.format(yMin)} to {CHART_NUMBER_FORMAT.format(yMax)}</span></div></div><ChartValuesTable id={valuesId} data={data} type={type} rows={points.map((point) => ({ label: point.x, value: point.y }))} /></>;
   }
   if (type === "line") {
     const values = numericValues.slice(0, 24);
@@ -270,7 +303,7 @@ export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; ty
       if (point === null) segments.push([]);
       else segments[segments.length - 1].push(`${point.x},${point.y}`);
     }
-    return <><ChartLimitNotice data={data} shown={values.length} available={data.labels.length} unit="categories" />{finiteValues.length < values.length ? <ChartNotice>Missing or invalid values are shown as gaps, not zero.</ChartNotice> : null}<div className="line-chart" role="img" aria-label="Generated line chart"><svg viewBox="0 0 600 260" preserveAspectRatio="none" aria-hidden="true"><path className="line-grid" d="M30 30H570 M30 80H570 M30 130H570 M30 180H570 M30 230H570" />{segments.filter((segment) => segment.length > 1).map((segment, index) => <polyline key={index} points={segment.join(" ")} />)}{points.map((point, index) => point === null ? null : <circle key={index} cx={point.x} cy={point.y} r="5"><title>{`${data.labels[index]}: ${values[index]}`}</title></circle>)}</svg><div>{data.labels.slice(0, 24).map((label, index) => <small key={`${label}-${index}`} title={`${label}: ${values[index] ?? "unavailable"}`}>{String(label)}</small>)}</div></div></>;
+    return <><ChartLimitNotice data={data} shown={values.length} available={data.labels.length} unit="categories" />{finiteValues.length < values.length ? <ChartNotice>Missing or invalid values are shown as gaps, not zero.</ChartNotice> : null}<div className="line-chart" role="img" aria-label="Generated line chart" aria-describedby={`${valuesId}-caption`} aria-details={valuesId}><svg viewBox="0 0 600 260" preserveAspectRatio="none" aria-hidden="true"><path className="line-grid" d="M30 30H570 M30 80H570 M30 130H570 M30 180H570 M30 230H570" />{segments.filter((segment) => segment.length > 1).map((segment, index) => <polyline key={index} points={segment.join(" ")} />)}{points.map((point, index) => point === null ? null : <circle key={index} cx={point.x} cy={point.y} r="5"><title>{`${data.labels[index]}: ${values[index]}`}</title></circle>)}</svg><div>{data.labels.slice(0, 24).map((label, index) => <small key={`${label}-${index}`} title={`${label}: ${values[index] ?? "unavailable"}`}>{String(label)}</small>)}</div></div><ChartValuesTable id={valuesId} data={data} type={type} rows={data.labels.slice(0, 24).map((label, index) => ({ label, value: values[index] }))} /></>;
   }
   const displayedValues = numericValues.slice(0, 12);
   const finiteValues = displayedValues.filter((value): value is number => value !== null);
@@ -278,10 +311,10 @@ export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; ty
   const maximum = Math.max(...finiteValues, 0);
   const range = maximum - minimum || 1;
   const baseline = (maximum / range) * 100;
-  return <><ChartLimitNotice data={data} shown={displayedValues.length} available={data.labels.length} unit="categories" />{finiteValues.length < displayedValues.length ? <ChartNotice>Missing or invalid values are marked — and have no bar.</ChartNotice> : null}{minimum < 0 ? <ChartNotice>Negative values extend below the zero baseline.</ChartNotice> : null}<div className="bar-chart" role="img" aria-label="Generated data chart">{data.labels.slice(0, 12).map((label, index) => {
+  return <><ChartLimitNotice data={data} shown={displayedValues.length} available={data.labels.length} unit="categories" />{finiteValues.length < displayedValues.length ? <ChartNotice>Missing or invalid values are marked — and have no bar.</ChartNotice> : null}{minimum < 0 ? <ChartNotice>Negative values extend below the zero baseline.</ChartNotice> : null}<div className="bar-chart" role="img" aria-label="Generated data chart" aria-describedby={`${valuesId}-caption`} aria-details={valuesId}>{data.labels.slice(0, 12).map((label, index) => {
     const value = displayedValues[index];
     return <div className="bar-item" key={`${label}-${index}`}><div className="bar-value">{value === null ? "—" : CHART_NUMBER_FORMAT.format(value)}</div><div className="bar-track" style={{ position: "relative" }}><i aria-hidden="true" style={{ position: "absolute", top: `${baseline}%`, left: 0, right: 0, borderTop: "1px solid var(--border-strong)" }} />{value === null ? null : <span className={value < 0 ? "negative" : undefined} style={{ position: "absolute", top: `${value >= 0 ? ((maximum - value) / range) * 100 : baseline}%`, height: `${(Math.abs(value) / range) * 100}%`, left: "50%", transform: "translateX(-50%)" }} />}</div><small title={String(label)}>{String(label)}</small></div>;
-  })}</div></>;
+  })}</div><ChartValuesTable id={valuesId} data={data} type={type} rows={data.labels.slice(0, 12).map((label, index) => ({ label, value: displayedValues[index] }))} /></>;
 }
 
 export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, externalBusy, onNotice, onBusyChange }: Props) {

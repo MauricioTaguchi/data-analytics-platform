@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.router import api_router
 from app.core.cache import CacheService
@@ -53,7 +54,8 @@ async def security_and_rate_limit(request: Request, call_next):
         "/auth/login", "/auth/register", "/auth/password-reset/request", "/auth/password-reset/confirm",
     )):
         try:
-            attempts = CacheService.increment(
+            attempts = await run_in_threadpool(
+                CacheService.increment,
                 f"rate-limit:auth:{_client_address(request)}",
                 settings.AUTH_RATE_LIMIT_WINDOW_SECONDS,
             )
