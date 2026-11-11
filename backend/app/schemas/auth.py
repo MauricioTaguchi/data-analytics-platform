@@ -1,4 +1,6 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.security import validate_bcrypt_password_length
 
@@ -41,3 +43,30 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        return RegisterRequest.validate_password_strength(value)
+
+
+class PasswordResetResponse(BaseModel):
+    message: str
+
+
+class AccountResponse(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    created_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)

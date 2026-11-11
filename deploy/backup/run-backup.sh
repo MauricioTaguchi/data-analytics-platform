@@ -8,6 +8,15 @@ umask 077
 : "${DATAFLOW_BACKUP_DIR:?Set a private absolute backup destination}"
 : "${DATAFLOW_BACKUP_ENV_FILE:=/etc/dataflow/backup.env}"
 : "${DATAFLOW_BACKUP_LOCK_FILE:=/run/lock/dataflow-backup.lock}"
+: "${DATAFLOW_BACKUP_REQUIRE_REMOTE:=true}"
+
+[[ "$DATAFLOW_BACKUP_REQUIRE_REMOTE" = true || "$DATAFLOW_BACKUP_REQUIRE_REMOTE" = false ]] || {
+  echo 'DATAFLOW_BACKUP_REQUIRE_REMOTE must be true or false.' >&2; exit 1;
+}
+if [[ "$DATAFLOW_BACKUP_REQUIRE_REMOTE" = true && -z "${DATAFLOW_BACKUP_S3_BUCKET:-}" ]]; then
+  echo 'An independent S3 backup destination is required before scheduled maintenance.' >&2
+  exit 1
+fi
 
 [[ "$DATAFLOW_PROJECT_DIR" = /* && "$DATAFLOW_BACKUP_DIR" = /* ]] || {
   echo 'Project and backup directories must be absolute.' >&2; exit 1;
@@ -80,5 +89,10 @@ if [[ -n "${DATAFLOW_BACKUP_S3_BUCKET:-}" ]]; then
   "${compose[@]}" run --rm --no-deps recovery python -m app.operations.object_backup upload \
     --bucket "$DATAFLOW_BACKUP_S3_BUCKET" --prefix "${DATAFLOW_BACKUP_S3_PREFIX:-dataflow-backups}" \
     --archive "/backups/$archive" --receipt "/backups/$archive.receipt.json" "${endpoint[@]}"
+  result=independent_copy_uploaded
+else
+  result=local_only
 fi
+printf '{"status":"%s","archive":"%s","completed_at":"%s"}\n' \
+  "$result" "$archive" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DATAFLOW_BACKUP_DIR/$archive.completed.json"
 echo "Verified backup completed: $archive"

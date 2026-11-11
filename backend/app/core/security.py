@@ -25,16 +25,16 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         password_hash,
     )
 
-def _create_token(subject: str, token_type: str, expires_delta: timedelta, jti: str | None = None) -> str:
+def _create_token(subject: str, token_type: str, expires_delta: timedelta, jti: str | None = None, *, auth_version: int = 0) -> str:
     expires_at = datetime.now(timezone.utc) + expires_delta
-    payload = {"sub": subject, "exp": expires_at, "type": token_type, "jti": jti or uuid4().hex}
+    payload = {"sub": subject, "exp": expires_at, "type": token_type, "jti": jti or uuid4().hex, "ver": auth_version}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, *, auth_version: int = 0) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
-    return _create_token(subject, "access", expires_at - datetime.now(timezone.utc))
+    return _create_token(subject, "access", expires_at - datetime.now(timezone.utc), auth_version=auth_version)
 
 def create_refresh_token(subject: str, jti: str) -> str:
     return _create_token(subject, "refresh", timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), jti)

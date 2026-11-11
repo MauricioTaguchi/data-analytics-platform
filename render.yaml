@@ -2,6 +2,8 @@ services:
   - type: web
     name: data-analytics-api
     runtime: docker
+    # Capacity candidate for validation, not a measured production minimum.
+    plan: 1c-2g
     rootDir: backend
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health/ready
@@ -10,12 +12,11 @@ services:
     disk:
       name: dataflow-storage
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 5
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: data-analytics-db
-          property: connectionString
+        # Private URI for a separately provisioned, non-owner runtime role.
+        sync: false
       - key: REDIS_URL
         fromService:
           type: redis
@@ -25,33 +26,92 @@ services:
         generateValue: true
       - key: ENVIRONMENT
         value: production
-      - key: TRUST_PROXY_HEADERS
-        value: "true"
+      - key: FORWARDED_ALLOW_IPS
+        # Verified platform proxy peers/CIDRs; wildcard trust is rejected.
+        sync: false
       - key: CORS_ORIGINS
-        value: '["https://data-analytics-web.onrender.com"]'
+        sync: false
       - key: UPLOAD_DIR
         value: /var/data/uploads
       - key: REPORT_DIR
         value: /var/data/reports
+      - key: OPERATIONS_METRICS_TOKEN
+        generateValue: true
+      - key: CELERY_WORKER_CONCURRENCY
+        value: "1"
+      - key: TRANSFORMATION_ENGINE_THREADS
+        value: "1"
+      - key: DATASET_PREVIEW_MEMORY_MB
+        value: "256"
+      - key: DATASET_PREVIEW_MAX_CONCURRENT
+        value: "1"
+      - key: DASHBOARD_QUERY_MAX_CONCURRENT
+        value: "1"
+      - key: MAX_CONCURRENT_UPLOAD_REQUESTS
+        value: "1"
+      - key: DATABASE_POOL_SIZE
+        value: "3"
+      - key: DATABASE_MAX_OVERFLOW
+        value: "2"
+      - key: PASSWORD_RESET_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: SMTP_TLS_MODE
+        value: starttls
 
   - type: web
     name: data-analytics-web
-    runtime: docker
+    runtime: static
     rootDir: frontend
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /healthz
+    buildCommand: corepack enable && corepack prepare pnpm@11.19.0 --activate && pnpm install --frozen-lockfile && pnpm build
+    staticPublishPath: ./dist
     autoDeployTrigger: checksPass
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Content-Security-Policy
+        # Replace the reserved placeholder with the verified API origin before release.
+        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.example.invalid; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache
     envVars:
+      - key: NODE_VERSION
+        value: "22"
       - key: VITE_API_URL
-        value: https://data-analytics-api.onrender.com/api/v1
+        sync: false
 
   - type: redis
     name: data-analytics-redis
     ipAllowList: []
     maxmemoryPolicy: noeviction
+    plan: 256mb
 
 databases:
   - name: data-analytics-db
+    plan: 0.1c-256mb
+    diskSizeGB: 5
     postgresMajorVersion: "16"
     databaseName: analytics
     user: analytics

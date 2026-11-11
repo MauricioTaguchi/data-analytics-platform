@@ -48,6 +48,21 @@ jobs:
           docker run --rm --entrypoint promtool \
             -v "$PWD/ops:/work:ro" -w /work \
             prom/prometheus:v3.13.5 test rules prometheus-alerts.test.yml
+      - name: Verify authenticated local firing and resolved notification delivery
+        run: |
+          container=$(docker create prom/alertmanager:v0.35.0)
+          trap 'docker rm -f "$container" >/dev/null' EXIT
+          docker cp "$container:/bin/alertmanager" "$RUNNER_TEMP/alertmanager"
+          chmod 700 "$RUNNER_TEMP/alertmanager"
+          python ops/alert_delivery_smoke.py --alertmanager-binary "$RUNNER_TEMP/alertmanager" --output "$RUNNER_TEMP/alert-delivery.json"
+      - name: Upload local delivery evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: local-alert-delivery
+          path: ${{ runner.temp }}/alert-delivery.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Remove temporary configuration credential
         if: always()
         run: rm -f "$RUNNER_TEMP/dataflow-test-metrics-token"

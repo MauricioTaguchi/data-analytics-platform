@@ -14,7 +14,7 @@ from app.services.dataset_service import DatasetService
 from app.services.chart_cache import chart_cache
 from app.services.chart_filters import apply_filters, column_kind
 from app.services.chart_query import (
-    bounded_result, json_value, pie_result, query_gate, query_parquet, required_columns, validate_chart,
+    bounded_result, json_value, metric_result, pie_result, query_gate, query_parquet, required_columns, validate_chart,
 )
 
 class DashboardService:
@@ -128,28 +128,40 @@ class DashboardService:
 
         if chart.chart_type == "table":
             preview = df.head(100).astype(object).where(pd.notna(df.head(100)), None)
-            return bounded_result([], [], total_count=len(df), rows=preview.to_dict(orient="records"))
+            return metric_result(bounded_result([], [], total_count=len(df), rows=preview.to_dict(orient="records")), chart, len(df), len(df))
 
         if chart.chart_type == "scatter":
             x, y = df[chart.x_column], df[chart.y_column]
             valid = x.map(lambda value: pd.notna(value) and math.isfinite(float(value))) & y.map(
                 lambda value: pd.notna(value) and math.isfinite(float(value)))
             total = int(valid.sum())
-            return bounded_result(json_value(x[valid].head(100).tolist()), json_value(y[valid].head(100).tolist()),
-                                  total_count=total, omitted_count=len(df) - total)
+            return metric_result(bounded_result(json_value(x[valid].head(100).tolist()), json_value(y[valid].head(100).tolist()),
+                                  total_count=total, omitted_count=len(df) - total), chart, len(df), total)
 
         if chart.chart_type == "histogram":
             if not chart.x_column or chart.x_column not in df.columns:
                 raise ValueError("Invalid X column.")
-            if df[chart.x_column].dropna().empty:
-                return {"labels": [], "values": [], "rows": []}
-            counts, _bins = pd.cut(df[chart.x_column].dropna(), bins=10, retbins=True)
+            values = df[chart.x_column].dropna()
+            if values.empty:
+                return metric_result({"labels": [], "values": [], "rows": []}, chart, len(df), 0)
+            if any(not math.isfinite(float(value)) for value in values):
+                raise ValueError("Histograms require finite numeric values.")
+            counts, _bins = pd.cut(values, bins=10, retbins=True)
             grouped = counts.value_counts().sort_index()
-            return {
+            return metric_result({
                 "labels": [str(label) for label in grouped.index],
                 "values": [int(value) for value in grouped.values],
                 "rows": [],
-            }
+            }, chart, len(df), len(values))
+
+        column = chart.y_column or (chart.x_column if chart.chart_type == "kpi" else None)
+        aggregation = chart.aggregation or ("count" if chart.chart_type == "kpi" else "sum")
+        if column and aggregation != "count" and chart.chart_type != "pie":
+            values = df[column]
+            finite = values.map(lambda value: pd.notna(value) and math.isfinite(float(value)))
+            if not finite.all():
+                df = df.assign(**{column: values.where(finite, None)})
+        valid_count = int(df[column].count()) if column else len(df)
 
         if chart.chart_type == "kpi":
             column = chart.y_column or chart.x_column
@@ -172,7 +184,7 @@ class DashboardService:
                 value = value.item()
             if pd.isna(value):
                 value = None
-            return {"labels": [chart.title], "values": [value], "rows": []}
+            return metric_result({"labels": [chart.title], "values": [value], "rows": []}, chart, len(df), valid_count)
 
         if not chart.x_column or chart.x_column not in df.columns:
             raise ValueError("Invalid X column.")
@@ -195,10 +207,10 @@ class DashboardService:
                 grouped = cls._drop_nan_aggregates(grouped)
             else:
                 grouped = df[chart.x_column].astype(str).value_counts()
-            return pie_result(
+            return metric_result(pie_result(
                 [str(value) for value in grouped.index.tolist()],
                 [value.item() if hasattr(value, "item") else value for value in grouped.values],
-            )
+            ), chart, len(df), valid_count)
 
         if not chart.y_column or chart.y_column not in df.columns:
             raise ValueError("Invalid Y column.")
@@ -212,4 +224,4 @@ class DashboardService:
         grouped = grouped.head(100)
         labels = [str(v) for v in grouped.index.tolist()]
         values = [v.item() if hasattr(v, "item") else v for v in grouped.tolist()]
-        return bounded_result(labels, values, total_count=total)
+        return metric_result(bounded_result(labels, values, total_count=total), chart, len(df), valid_count)

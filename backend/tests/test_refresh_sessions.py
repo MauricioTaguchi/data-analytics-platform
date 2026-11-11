@@ -229,6 +229,9 @@ def test_migration_preserves_legacy_sessions_and_active_tokens(tmp_path, monkeyp
         )
         assert not family_column["nullable"]
 
+        # Application models must run against the current schema, including
+        # subsequent account/session migrations.
+        command.upgrade(config, "head")
         with Session(migration_engine) as db:
             rotated = auth_routes.refresh(
                 RefreshRequest(refresh_token=create_refresh_token("1", "legacy-active")), db

@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-11T02:25:50.304617+00:00",
+  "git_base_commit": "c2225d747b43fd6ff20c18d7d4541bf35547327e",
+  "source_identity": "SHA-256 of the measured working-tree files; base commit alone does not identify changes.",
+  "source_fingerprints": {
+    "scripts/benchmark_preview_cache.py": "20ed7768346a65bba08fe78c683610ec3fa87e019c324a14f6245dd59bbb9932",
+    "app/core/config.py": "d4425193887508922def948b9637359aecc0e05220576d85f3c5d1caaeca9d2c",
+    "app/services/dataset_service.py": "dd2d88552eee446ecaed7eb4b40890b51b7e2ba2f2a1c98c803b20712c3304a8",
+    "app/services/snapshot_service.py": "f0afaed995372b7c00b8e99727d5f89186612d44fb40a6f3b1d99ae8accbe783",
+    "app/services/preview_cache_service.py": "c7dd3323237b88d5d90f7800abae5e3e5f10184901eba29116036eaf7b8f1deb",
+    "app/services/file_integrity.py": "a6bda1d2cf07dc468470edd7ff4b2bc6a67b29dcbe2a6a1b99906b265f7aafeb",
+    "app/services/engines/runner.py": "8af11b1b17679831fd4cbc3ecd536bc122a69c253a9d2dcb8d1219c296d31751",
+    "app/services/engines/contracts.py": "7b509ce876a1a2e24cdb7733b4ebb88c7c701bd39235e5c5926b16138f6fa3f7"
+  },
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "cgroup_cpu_max": null,
+  "cgroup_memory_max": null,
+  "scope": "Warm local filesystem, sequential requests, fresh supervised child per request; not production capacity.",
+  "python": "3.12.14",
+  "pandas": "2.2.3",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "cpu_count": 9,
+  "repeats": 5,
+  "cases": [
+    {
+      "format": "csv",
+      "rows": 100000,
+      "columns": 12,
+      "source_bytes": 7784842,
+      "source_sha256": "584882928fdeaa9d7d83d0525d2e61ec389bdf83f97a1eaca695138507cb7f87",
+      "cache_bytes": 19421,
+      "preview_rows": 100,
+      "parity": true,
+      "inspection_with_cache_seconds": 0.8203199830004451,
+      "seconds": {
+        "parser": [
+          0.7032881669983908,
+          0.8083973520006111,
+          0.6670215100002679,
+          0.7683333790009783,
+          0.7191271779993258
+        ],
+        "cache": [
+          0.13344162500106904,
+          0.13327077600115445,
+          0.13323272900015581,
+          0.13337065800078562,
+          0.13331789800031402
+        ]
+      },
+      "median_seconds": {
+        "parser": 0.7191271779993258,
+        "cache": 0.13331789800031402
+      },
+      "median_speedup": 5.3940782804543765,
+      "policy": {
+        "timeout_seconds": 15,
+        "memory_limit_bytes": 536870912,
+        "threads": 1
+      }
+    },
+    {
+      "format": "json",
+      "rows": 100000,
+      "columns": 12,
+      "source_bytes": 21596525,
+      "source_sha256": "65385d96015ca57b13cfe7f3ab5de03d0ed6884545ccfb68359a780a9a17852f",
+      "cache_bytes": 20185,
+      "preview_rows": 100,
+      "parity": true,
+      "inspection_with_cache_seconds": 1.420436313999744,
+      "seconds": {
+        "parser": [
+          1.107420470998477,
+          1.0094701329999225,
+          0.9360508250010753,
+          1.1098572060000151,
+          0.9681684820006922
+        ],
+        "cache": [
+          0.16536434100089537,
+          0.1655345839990332,
+          0.1657207139996899,
+          0.16551518500091333,
+          0.16551435300061712
+        ]
+      },
+      "median_seconds": {
+        "parser": 1.0094701329999225,
+        "cache": 0.16551518500091333
+      },
+      "median_speedup": 6.09895782670546,
+      "policy": {
+        "timeout_seconds": 15,
+        "memory_limit_bytes": 536870912,
+        "threads": 1
+      }
+    },
+    {
+      "format": "xlsx",
+      "rows": 10000,
+      "columns": 12,
+      "source_bytes": 451219,
+      "source_sha256": "6b4f127105c3e90adfbf56b6047b1f5e31c4efc676ceb94837c72052ac2175ab",
+      "cache_bytes": 19819,
+      "preview_rows": 100,
+      "parity": true,
+      "inspection_with_cache_seconds": 1.468350223998641,
+      "seconds": {
+        "parser": [
+          1.4138844019998942,
+          1.4407615229993098,
+          1.4132933239998238,
+          1.3214354249994358,
+          1.5114424799994595
+        ],
+        "cache": [
+          0.11715809099951002,
+          0.11730571299995063,
+          0.1344259500001499,
+          0.11742521400083206,
+          0.11723761900066165
+        ]
+      },
+      "median_seconds": {
+        "parser": 1.4138844019998942,
+        "cache": 0.11730571299995063
+      },
+      "median_speedup": 12.052988433738852,
+      "policy": {
+        "timeout_seconds": 15,
+        "memory_limit_bytes": 536870912,
+        "threads": 1
+      }
+    }
+  ]
+}

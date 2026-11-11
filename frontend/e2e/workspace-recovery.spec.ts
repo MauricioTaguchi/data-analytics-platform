@@ -9,12 +9,14 @@ async function connect(page: Page) {
   await page.getByRole("button", { name: "Skip tour" }).click();
   const menu = page.getByRole("button", { name: "Open menu" });
   if (await menu.isVisible()) await menu.click();
-  await page.getByRole("button", { name: "Connect API" }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("group", { name: "Account access" }).getByRole("button", { name: "Create account", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Workspace Tester");
   await page.getByLabel("Email", { exact: true }).fill("workspace@example.com");
-  await page.getByLabel("Password", { exact: true }).fill("workspace12345");
-  await page.getByRole("button", { name: "Create and connect" }).click();
-  await expect(page.getByRole("dialog", { name: "Connect to the production workflow" })).toBeHidden();
+  await page.getByLabel("New password", { exact: true }).fill("workspace12345");
+  await page.getByLabel("Confirm new password", { exact: true }).fill("workspace12345");
+  await page.locator(".connection-dialog form").getByRole("button", { name: "Create account", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Create your account" })).toBeHidden();
 }
 async function commonApi(route: Route) {
   const path = new URL(route.request().url()).pathname;

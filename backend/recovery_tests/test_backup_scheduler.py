@@ -49,8 +49,8 @@ if "create" in args:
                    "DATAFLOW_BACKUP_ENV_FILE": str(configuration), "DATAFLOW_BACKUP_LOCK_FILE": str(tmp_path / "lock"),
                    "COMMAND_LOG": str(log), "DATAFLOW_BACKUP_S3_BUCKET": "test-private-backups"}
 
-    def run(fail_at=""):
-        result = subprocess.run(["bash", str(WRAPPER)], env={**environment, "FAIL_AT": fail_at},
+    def run(fail_at="", **overrides):
+        result = subprocess.run(["bash", str(WRAPPER)], env={**environment, "FAIL_AT": fail_at, **overrides},
                                 capture_output=True, text=True, timeout=10)
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return result, calls
@@ -85,3 +85,15 @@ def test_failed_remote_upload_leaves_services_restarted(maintenance):
     result, calls = maintenance("upload")
     assert result.returncode != 0
     assert len([call for call in calls if "start" in call]) == 1
+
+
+def test_missing_independent_destination_fails_before_any_maintenance(maintenance):
+    result, calls = maintenance(DATAFLOW_BACKUP_S3_BUCKET="")
+    assert result.returncode != 0
+    assert not calls
+
+
+def test_local_only_rehearsal_requires_explicit_opt_out(maintenance):
+    result, calls = maintenance(DATAFLOW_BACKUP_S3_BUCKET="", DATAFLOW_BACKUP_REQUIRE_REMOTE="false")
+    assert result.returncode == 0, result.stderr
+    assert not any("upload" in call for call in calls)

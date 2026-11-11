@@ -10,7 +10,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO :"runtime
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"runtime_role";
 REVOKE UPDATE, DELETE, TRUNCATE ON dataset_events FROM :"runtime_role";
 REVOKE UPDATE, DELETE, TRUNCATE ON dataset_snapshots FROM :"runtime_role";
-GRANT UPDATE (availability, pinned, expired_at, retention_checked_at) ON dataset_snapshots TO :"runtime_role";
+GRANT UPDATE (availability, pinned, expired_at, retention_checked_at, preview_cache_json, preview_cache_sha256) ON dataset_snapshots TO :"runtime_role";
 COMMIT;
 -- Deploy migrations with a separate owner role; never give its credentials to
 -- API/workers. Triggers also reject direct SQL mutation. A database owner or

@@ -20,22 +20,24 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   await page.goto("/");
   await page.getByRole("button", { name: "Skip tour" }).click();
   await openMenu(page);
-  await page.getByRole("button", { name: "Connect API" }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("group", { name: "Account access" }).getByRole("button", { name: "Create account", exact: true }).click();
   await page.getByLabel("Name").fill("Portfolio Reviewer");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill("portfolio12345");
+  await page.getByLabel("New password", { exact: true }).fill("portfolio12345");
+  await page.getByLabel("Confirm new password", { exact: true }).fill("portfolio12345");
 
   const registrationResponsePromise = page.waitForResponse(
     (response) => response.url().endsWith("/auth/register") && response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "Create and connect" }).click();
+  await page.locator(".connection-dialog form").getByRole("button", { name: "Create account", exact: true }).click();
   const registrationResponse = await registrationResponsePromise;
   expect(registrationResponse.status(), await registrationResponse.text()).toBe(201);
   const { access_token: accessToken } = await registrationResponse.json();
   const apiUrl = registrationResponse.url().replace(/\/auth\/register$/, "");
   const headers = { Authorization: `Bearer ${accessToken}` };
-  await expect(page.getByRole("dialog", { name: "Connect to the production workflow" })).toBeHidden();
-  await expect(page.locator(".dataset-heading").getByText("Live API", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Create your account" })).toBeHidden();
+  await expect(page.locator(".dataset-heading").getByText("Signed in", { exact: true })).toBeVisible();
   const uploadInput = page.locator('input[type="file"]');
   await expect(uploadInput).toBeEnabled();
 
@@ -47,7 +49,7 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(uploadResponse.status(), await uploadResponse.text()).toBe(202);
   const { dataset_id: datasetId } = await uploadResponse.json();
   const datasetUrl = `${apiUrl}/datasets/${datasetId}`;
-  await expect(page.getByText("Import and profiling completed through the worker queue.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Your dataset is saved and ready to explore.")).toBeVisible({ timeout: 30_000 });
 
   const initialResponse = await page.request.get(datasetUrl, { headers });
   expect(initialResponse.ok()).toBe(true);
@@ -107,9 +109,8 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   await expect(page.locator(".dataset-heading").getByText("Demo mode", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => [...Object.values(localStorage), ...Object.values(sessionStorage)].join(" "))).not.toContain(accessToken);
   await openMenu(page);
-  await page.getByRole("button", { name: "Connect API" }).click();
-  const connection = page.getByRole("dialog", { name: "Connect to the production workflow" });
-  await connection.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const connection = page.getByRole("dialog", { name: "Sign in to DataFlow" });
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill("portfolio12345");
   await connection.locator("form").getByRole("button", { name: "Sign in", exact: true }).click();
@@ -166,5 +167,5 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
 
   await openMenu(page);
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByText("The server session was revoked, active work was cancelled, and the local demo was restored.")).toBeVisible();
+  await expect(page.getByText("You're signed out. Your saved projects are safe, and the sample is ready to explore.")).toBeVisible();
 });

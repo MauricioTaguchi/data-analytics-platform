@@ -3,6 +3,8 @@ import { checkApiHealth, describeApiError, downloadDataset, type AuthenticationI
 import { exportCsvText } from "./data-utils";
 import { processingState } from "./processing-state";
 import { WorkspacePicker } from "./components/WorkspacePicker";
+import type { AccountMode } from "./account-utils";
+import { AccountPanel } from "./components/AccountPanel";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import { DatasetWorkspace } from "./components/DatasetWorkspace";
@@ -22,7 +24,7 @@ import { useTransformations } from "./hooks/useTransformations";
 import { useTheme } from "./hooks/useTheme";
 
 const TOUR_STEPS = [
-  { title: "Start with trustworthy data", body: "Use the instant sample or connect the API to persist datasets, jobs, and lineage." },
+  { title: "Start with trustworthy data", body: "Explore the sample, or sign in to save your datasets and return to your work later." },
   { title: "Measure before changing", body: "Quality, missing values, and duplicates remain visible before every transformation." },
   { title: "Deliver decisions, not files", body: "Build charts, export governed datasets, and generate auditable PDF reports." },
 ];
@@ -32,7 +34,7 @@ const SECTION_COPY: Record<WorkspaceSection, { title: string; subtitle: string }
   datasets: { title: "Dataset workspace", subtitle: "Inspect schema, quality, completeness, and processing state." },
   transformations: { title: "Transformation pipeline", subtitle: "Preview, version, apply, and reverse governed data changes." },
   dashboards: { title: "Interactive dashboards", subtitle: "Create reusable charts backed by transformed datasets." },
-  reports: { title: "Executive reports", subtitle: "Generate and download worker-rendered PDF summaries." },
+  reports: { title: "Executive reports", subtitle: "Create PDF summaries of your saved data." },
   monitoring: { title: "Operations monitoring", subtitle: "Track background jobs, failures, progress, and cancellation." },
 };
 
@@ -41,23 +43,26 @@ function saveBlob(blob: Blob, filename: string) {
   link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
 }
 
-export function App() {
+export function App({ initialResetToken = null }: { initialResetToken?: string | null }) {
   const { theme, toggleTheme } = useTheme();
   const auth = useAuthentication();
   const jobs = useProfilingJob();
   const workspace = useDatasetUpload(auth.project?.id ?? null);
   const transformations = useTransformations(workspace.dataset, workspace.rows, workspace.setRows, workspace.refresh, jobs.track, workspace.columns, auth.live);
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("overview");
-  const [notice, setNotice] = useState("The portfolio sample is ready. Connect the API to enable persistent workflows.");
+  const [notice, setNotice] = useState("Explore the sample, or sign in to save and reopen your own work.");
   const [busy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
-  const [connectionOpen, setConnectionOpen] = useState(false);
-  const [tourStep, setTourStep] = useState<number | null>(0);
+  const [connectionOpen, setConnectionOpen] = useState(initialResetToken !== null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [connectionOptions, setConnectionOptions] = useState<{ mode: AccountMode; email?: string; token?: string }>({ mode: initialResetToken !== null ? "reset" : "login", token: initialResetToken ?? undefined });
+  const [tourStep, setTourStep] = useState<number | null>(initialResetToken !== null ? null : 0);
   const tourDialog = useDialogFocus(tourStep !== null, () => setTourStep(null));
   const [apiStatus, setApiStatus] = useState("not checked");
   const lifecycleOperation = useRef(false);
   const menuButton = useRef<HTMLButtonElement>(null);
+  const accountButton = useRef<HTMLButtonElement>(null);
   const combinedBusy = busy || lifecycleBusy || auth.busy;
   const processing = processingState(jobs.jobs, workspace.uploadPhase, workspace.uploadProgress, workspace.workflowStatus);
   const uploadLabel = workspace.uploadPhase === "uploading"
@@ -70,7 +75,7 @@ export function App() {
     { label: workspace.dataset ? "Dataset rows" : "Preview rows", value: rowCount, caption: workspace.dataset ? "Current dataset version" : "Rows in the local preview", icon: "rows" },
     { label: "Columns", value: columnCount, caption: "Attributes in this dataset", icon: "columns" },
     { label: "Transformations", value: transformations.history.length, caption: "Recorded history events", icon: "transformations" },
-    { label: "Worker jobs", value: jobs.jobs.length, caption: "Tracked background tasks", icon: "monitoring" },
+    { label: "Background tasks", value: jobs.jobs.length, caption: "Recent processing requests", icon: "monitoring" },
   ];
 
   function closeMobileNav() {
@@ -103,15 +108,29 @@ export function App() {
     workspace.reset();
     transformations.reset();
     setBusy(false);
-    setNotice("Your session expired. Server-backed data was cleared from this browser; reconnect to continue.");
+    setAccountOpen(false);
+    setNotice("Your session expired. Sign in again to reopen your saved work.");
   }, [auth.sessionExpiredAt, jobs.reset, transformations.reset, workspace.reset]);
 
   async function connect(input: AuthenticationInput) {
-    try {
-      const project = await auth.connect(input);
-      jobs.reset(); workspace.reset(); transformations.reset();
-      setConnectionOpen(false); setNotice(`Connected to “${project.name}”. Choose a saved dataset to resume, or upload a new file.`);
-    } catch (error) { setNotice(describeApiError(error)); }
+    const project = await auth.connect(input);
+    jobs.reset(); workspace.reset(); transformations.reset();
+    setConnectionOpen(false); setNotice(`Signed in to “${project.name}”. Choose a saved dataset to resume, or upload a new file.`);
+  }
+
+  function openSignIn(mode: AccountMode = "login", email?: string) {
+    setAccountOpen(false);
+    setTourStep(null);
+    setConnectionOptions({ mode, email });
+    setConnectionOpen(true);
+  }
+
+  async function passwordResetComplete() {
+    await auth.disconnect();
+    jobs.reset(); workspace.reset(); transformations.reset();
+    setAccountOpen(false);
+    setConnectionOptions({ mode: "login" });
+    setNotice("Your password was updated. Sign in again to reopen your saved work.");
   }
 
   async function runLifecycleOperation(operation: () => Promise<void>) {
@@ -140,7 +159,8 @@ export function App() {
       workspace.reset();
       transformations.reset();
       await auth.disconnect();
-      setNotice("The server session was revoked, active work was cancelled, and the local demo was restored.");
+      setAccountOpen(false);
+      setNotice("You're signed out. Your saved projects are safe, and the sample is ready to explore.");
     });
   }
 
@@ -179,7 +199,7 @@ export function App() {
     setBusy(true); jobs.reset(); transformations.reset(); setNotice("Uploading and validating the dataset…");
     try {
       const result = await workspace.upload(file, auth.project?.id || null, jobs.track);
-      setNotice(result.mode === "live" ? "Import and profiling completed through the worker queue." : "CSV loaded locally. Connect the API for durable processing.");
+      setNotice(result.mode === "live" ? "Your dataset is saved and ready to explore." : "CSV preview loaded. Sign in to save and process the full dataset.");
       setActiveSection("datasets");
     } catch (error) { setNotice(describeApiError(error)); } finally { setBusy(false); }
   }
@@ -200,8 +220,8 @@ export function App() {
   }
 
   async function checkHealth() {
-    setBusy(true); try { const status = await checkApiHealth(); setApiStatus(status); setNotice(`API readiness: ${status}.`); }
-    catch { setApiStatus("unavailable"); setNotice("The API is unavailable. The local demo remains functional."); } finally { setBusy(false); }
+    setBusy(true); try { const status = await checkApiHealth(); setApiStatus(status); setNotice(`Service status: ${status}.`); }
+    catch { setApiStatus("unavailable"); setNotice("The service is unavailable right now. You can keep exploring the sample."); } finally { setBusy(false); }
   }
 
   async function exportDataset() {
@@ -225,22 +245,23 @@ export function App() {
     : <><section className="metric-grid hero-metrics" aria-label="Dataset summary">{metrics.map((metric) => <div className="metric-card" key={metric.label}><span className="metric-icon"><WorkspaceIcon name={metric.icon} size={21} /></span><span className="metric-label">{metric.label}</span><strong>{metric.value.toLocaleString("en-US")}</strong><small>{metric.caption}</small></div>)}</section><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} processing={processing} /></>;
 
   return <div className="app-shell">
-    <WorkspaceSidebar activeSection={activeSection} mobileOpen={mobileNav} live={auth.live} busy={combinedBusy} onNavigate={setActiveSection} onCloseMobile={closeMobileNav} onCheckApi={checkHealth} onConnect={() => setConnectionOpen(true)} onDisconnect={() => void disconnect()} />
+    <WorkspaceSidebar activeSection={activeSection} mobileOpen={mobileNav} live={auth.live} busy={combinedBusy} onNavigate={setActiveSection} onCloseMobile={closeMobileNav} onCheckApi={checkHealth} onConnect={() => openSignIn()} onDisconnect={() => void disconnect()} />
     <main className="workspace" id="workspace-content"><header className="topbar">
       <button ref={menuButton} className="menu-button icon-button" onClick={() => setMobileNav((value) => !value)} aria-label="Open menu" aria-expanded={mobileNav} aria-controls="workspace-navigation"><WorkspaceIcon name="menu" /></button>
       <div className="breadcrumbs">Workspace <span>/</span> <strong>{sectionLabel}</strong></div>
-      <div className="topbar-tools"><button className="text-button tour-trigger" onClick={() => setTourStep(0)}>Guided tour</button><button className="icon-button theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`} title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}><WorkspaceIcon name={theme === "dark" ? "sun" : "moon"} /></button></div>
+      <div className="topbar-tools">{auth.live ? <button ref={accountButton} className="text-button" disabled={combinedBusy} onClick={() => setAccountOpen(true)}>Account</button> : null}<button className="text-button tour-trigger" onClick={() => setTourStep(0)}>Guided tour</button><button className="icon-button theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`} title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}><WorkspaceIcon name={theme === "dark" ? "sun" : "moon"} /></button></div>
     </header>
-      <section className="dataset-heading"><div><div className="title-line"><h1>{SECTION_COPY[activeSection].title}</h1><span className={auth.live ? "connected" : "connected demo"}><span className="status-dot" />{auth.live ? "Live API" : "Demo mode"}</span></div><p>{SECTION_COPY[activeSection].subtitle}</p></div>
+      <section className="dataset-heading"><div><div className="title-line"><h1>{SECTION_COPY[activeSection].title}</h1><span className={auth.live ? "connected" : "connected demo"}><span className="status-dot" />{auth.live ? "Signed in" : "Demo mode"}</span></div><p>{SECTION_COPY[activeSection].subtitle}</p></div>
         <div className="top-actions"><button className="secondary" disabled={combinedBusy} onClick={() => void restoreSample()}>Use sample</button>{workspace.uploadPhase !== "idle" ? <button className="secondary" onClick={() => void workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options)).then((cancelled) => { if (cancelled) setNotice("Cancelling the active workflow…"); })}>Cancel workflow</button> : null}<label className={`primary file-button${combinedBusy ? " disabled" : ""}`} aria-disabled={combinedBusy}><WorkspaceIcon name="upload" size={17} />{uploadLabel}<input aria-label="Upload dataset file" type="file" accept=".csv,.xlsx,.xls,.json,.parquet" disabled={combinedBusy} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void upload(file); }} /></label></div>
       </section>
       <div className="notice" role="status" aria-live="polite"><span aria-hidden="true">i</span>{notice}</div>
       {auth.live && auth.project ? <WorkspacePicker projects={auth.projects} projectId={auth.project.id} datasets={workspace.datasets} datasetId={workspace.dataset?.id ?? null} loading={workspace.catalogLoading} error={workspace.catalogError} busy={combinedBusy} onProject={selectProject} onDataset={(datasetId) => void openSavedDataset(datasetId)} onRefresh={workspace.reloadCatalog} /> : null}
       <section className="dataset-strip" aria-label="Current dataset"><div className="dataset-identity"><span className="dataset-icon"><WorkspaceIcon name="datasets" size={18} /></span><strong title={workspace.datasetName}>{workspace.datasetName}</strong><span className="status-pill">{workspace.dataset ? `Revision ${workspace.dataset.version}` : "Local preview"}</span></div><button className="text-button" onClick={() => setActiveSection(activeSection === "transformations" ? "datasets" : "transformations")}>{activeSection === "transformations" ? "Inspect dataset" : "View transformations"}<WorkspaceIcon name="chevron" size={15} /></button></section>
       {content}
-      <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{workspace.dataset ? "Authenticated session · server persistence" : "Local preview · up to 100 rows · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />{workspace.dataset ? "Export current version" : "Export preview CSV (up to 100 rows)"}</button></footer>
+      <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{workspace.dataset ? "Saved in your account" : "Local preview · up to 100 rows · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />{workspace.dataset ? "Export current version" : "Export preview CSV (up to 100 rows)"}</button></footer>
     </main>
-    {connectionOpen ? <ConnectionPanel busy={auth.busy} onClose={() => setConnectionOpen(false)} onSubmit={connect} /> : null}
+    {connectionOpen ? <ConnectionPanel busy={auth.busy} initialMode={connectionOptions.mode} initialEmail={connectionOptions.email} resetToken={connectionOptions.token} onClose={() => { setConnectionOpen(false); setConnectionOptions({ mode: "login" }); if (auth.live) accountButton.current?.focus(); }} onSubmit={connect} onPasswordReset={passwordResetComplete} /> : null}
+    {accountOpen && auth.live ? <AccountPanel busy={combinedBusy} onClose={() => setAccountOpen(false)} onSignOut={disconnect} onResetPassword={(email) => openSignIn("forgot", email)} /> : null}
     {tourStep !== null ? <div className="tour-backdrop" role="presentation"><section ref={tourDialog} tabIndex={-1} className="tour-dialog" role="dialog" aria-modal="true" aria-labelledby="tour-title"><span className="tour-progress">{tourStep + 1} of {TOUR_STEPS.length}</span><h2 id="tour-title">{TOUR_STEPS[tourStep].title}</h2><p>{TOUR_STEPS[tourStep].body}</p><div className="tour-dots" aria-hidden="true">{TOUR_STEPS.map((_, index) => <span key={index} className={index === tourStep ? "active" : ""} />)}</div><div className="button-row"><button className="secondary" onClick={() => setTourStep(null)}>Skip tour</button><button className="primary" data-dialog-initial-focus="true" onClick={() => setTourStep(tourStep === TOUR_STEPS.length - 1 ? null : tourStep + 1)}>{tourStep === TOUR_STEPS.length - 1 ? "Explore DataFlow" : "Next"}</button></div></section></div> : null}
   </div>;
 }

@@ -81,6 +81,21 @@ docker run --rm --entrypoint amtool -v "$PWD/ops/alertmanager.yml:/etc/alertmana
 
 Configuration semantics follow the upstream [Prometheus rule-test format](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/), [Alertmanager configuration](https://prometheus.io/docs/alerting/latest/configuration/), and [Compose secrets permissions](https://docs.docker.com/reference/compose-file/services/#secrets). Review pinned component releases and resource limits before using the overlay outside a local evaluation.
 
+### Verifying notification transport locally
+
+The [webhook receiver template](../ops/alertmanager.webhook.example.yml) supports HTTPS bearer authentication from a mounted secret file and sends resolved notifications. Its reserved example URL is intentionally unusable. The ordinary monitoring overlay still uses `local-review` and sends nothing externally. An operator must select and approve a real destination, replace the URL, mount `/run/secrets/dataflow_alert_receiver_token` with suitable permissions, and deliberately select that configuration before using external delivery.
+
+CI copies the Alertmanager binary from the pinned container image and runs [the delivery smoke test](../ops/alert_delivery_smoke.py). It starts a receiver on `127.0.0.1`, substitutes only a local URL/secret and shorter grouping intervals into the webhook template, posts a synthetic alert to a local Alertmanager, and requires authenticated **firing and resolved** HTTP deliveries within 45 seconds. The output omits credentials and payload contents and explicitly identifies `external_delivery_tested: false`.
+
+To repeat with an installed Alertmanager binary:
+
+```bash
+python ops/alert_delivery_smoke.py --alertmanager-binary /path/to/alertmanager \
+  --output /tmp/dataflow-alert-delivery.json
+```
+
+This verifies notification transport and resolution handling in isolation. It does not establish that an email, paging service, or team webhook received a message. After a destination has been configured with approval, perform a controlled delivery test to that destination and record the receiver's acknowledgement and escalation owner. Never silently interpret a local-only receiver as production on-call coverage.
+
 At minimum, production operators should monitor:
 
 - readiness failures and restart loops;
@@ -133,6 +148,8 @@ Do not downgrade a database blindly. Determine whether the migration is backward
 ## Backup and recovery ownership
 
 The repository includes a maintenance-window backup CLI, archive verification, isolated restore, an optional version-pinned S3 backup destination, and a real PostgreSQL restore drill in CI. See [Disaster recovery](DISASTER_RECOVERY.md) for commands, consistency requirements, and safe promotion of restored paths. These tools do not schedule or fund a production backup service. Configure destination, schedule, encryption, retention, and access control before accepting important data. Record measured production recovery objectives; the small CI fixture does not establish production RPO/RTO.
+
+The opt-in Compose systemd timer requires a versioned independent destination unless explicitly placed in local-only rehearsal mode. Check `systemctl status dataflow-backup.service`, service restart success, and the latest `*.completed.json` marked `independent_copy_uploaded`; failed transfers do not create a new completion marker. Monitor missed windows/backup age and disk growth through the chosen host monitoring platform. The default repository overlay does not scrape host systemd or backup-age metrics. A trusted remote receipt plus `ops/restore_drill.py` makes retrieval/restore timing reviewable without promoting restored data.
 
 Snapshot expiry is separate from backups and audit retention. It is disabled by default. See [Snapshot integrity and retention](SNAPSHOT_INTEGRITY.md) before setting `SNAPSHOT_RETENTION_DAYS`.
 

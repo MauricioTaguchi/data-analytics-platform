@@ -35,6 +35,20 @@ export type AuthenticationInput = {
   password: string;
 };
 
+export type AccountProfile = { id: number; name: string; email: string; created_at: string };
+
+export async function fetchAccountProfile(signal?: AbortSignal) {
+  return (await apiClient.get<AccountProfile>("/auth/me", { signal })).data;
+}
+
+export async function requestPasswordReset(email: string, signal?: AbortSignal) {
+  await apiClient.post("/auth/password-reset/request", { email }, { signal });
+}
+
+export async function confirmPasswordReset(token: string, newPassword: string, signal?: AbortSignal) {
+  await apiClient.post("/auth/password-reset/confirm", { token, new_password: newPassword }, { signal });
+}
+
 type TokenResponse = {
   access_token: string;
   refresh_token: string;
@@ -133,6 +147,11 @@ export type ChartData = {
   returned_count?: number | null;
   omitted_count?: number;
   grouped_count?: number;
+  aggregation?: Aggregation | null;
+  value_column?: string | null;
+  group_column?: string | null;
+  source_row_count?: number | null;
+  valid_value_count?: number | null;
   truncated?: boolean;
 };
 
@@ -207,7 +226,7 @@ apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const request = error.config as RetryableRequest | undefined;
-    const isAuthenticationRequest = String(request?.url || "").includes("/auth/");
+    const isAuthenticationRequest = /\/auth\/(?:login|register|refresh|logout|password-reset)(?:\/|$|\?)/.test(String(request?.url || ""));
     if (error.response?.status === 401 && request && !request._retry && refreshToken && !isAuthenticationRequest) {
       request._retry = true;
       const renewedAccessToken = await rotateSession();

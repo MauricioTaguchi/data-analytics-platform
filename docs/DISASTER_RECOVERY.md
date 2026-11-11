@@ -79,7 +79,9 @@ python -m app.operations.object_backup download \
   --receipt /backups/dataflow-2026-10-13.receipt.json
 ```
 
-Uploads use unique dated keys. Receipts contain the bucket, key, provider version ID when available, exact byte length, and SHA-256. Downloads pin the recorded version and compare locally streamed bytes against the trusted receipt; multipart ETags are never used as a content hash. An invalid download is not published to its destination.
+Uploads require bucket versioning to be enabled and use unique dated keys. The provider must return a non-null archive version ID. Receipts contain the bucket, key, version ID, exact byte length, SHA-256, and upload timestamp. A versioned encrypted receipt is stored beside the remote archive as `<archive key>.receipt.json`; the local receipt also records that receipt object's key/version. A failure to publish this independent inventory fails the operation. The backup identity therefore needs `GetBucketVersioning`, `PutObject`, and archive `HeadObject` access; recovery additionally needs `GetObjectVersion`. Restrict these permissions to the backup bucket/prefix and keep deletion/lifecycle authority separate.
+
+Downloads pin the recorded archive version and compare locally streamed bytes against the trusted receipt; multipart ETags are never used as a content hash. An invalid download is not published to its destination. After losing the application host, obtain the receipt through the authenticated independent storage account. Treat it as trusted only after confirming that account, bucket, version and access policy; a self-supplied hash does not authenticate an untrusted archive.
 
 Enable bucket versioning, encryption, restricted recovery-role access, retention, and optional Object Lock through the deployment provider. This tool does not create or configure a paid bucket. Provider integration tests require a disposable provider account; unit tests inject an S3 client and verify the adapter contract without network access. A real provider round trip is not implied by those tests.
 
@@ -98,6 +100,23 @@ RECOVERY_DRILL_REPORT=/tmp/dataflow-restore-drill.json \
 The JSON evidence records measured backup and restore duration, source capture time, verified file count, and restored row counts. The sample contains only two small CSV snapshots; its duration is functional evidence, not a production capacity benchmark or RTO commitment. CI retains the drill report so measurements remain attributable to the tested commit. Repeat with representative data volume, provider retrieval, networking, access-role setup, application smoke tests, and traffic promotion before defining deployment RTO. Measure RPO from the most recent verified recovery point, including the actual backup schedule and any failed captures.
 
 Run a full deployment drill regularly and after changes to schema, storage, encryption, permissions, or backup tooling. Record recovery failures as defects and rerun the drill after fixing them.
+
+### Timed operator recovery workflow
+
+`ops/restore_drill.py` wraps the same verified restoration used by CI. Run it with the recovery Python dependencies and PostgreSQL 16 tools in a **disposable recovery environment**. Supply `RECOVERY_ADMIN_DATABASE_URL` through protected configuration; no database URI or provider credential appears in command arguments. A trusted receipt can be retrieved independently from the application's host:
+
+```bash
+python ops/restore_drill.py \
+  --receipt /secure-inventory/selected.receipt.json \
+  --bucket private-dataflow-backups \
+  --directory /restore/drill-20261111 \
+  --output /secure-evidence/drill-20261111.json \
+  --trusted-backup
+```
+
+For an HTTPS S3-compatible endpoint, add `--endpoint-url` and the configured prefix if it differs from `dataflow-backups`. For a local archive, replace `--receipt`/`--bucket` with `--archive /secure-inventory/selected.tar`. Both the restore directory and output file must be new; the tool never promotes a database, overwrites an earlier drill, or drops an existing database.
+
+The mode-`0600` JSON records archive identity/capture time, remote retrieval time when used, isolated restore details, total measured time and a failure stage if recovery fails. Failure returns a nonzero exit status and keeps isolated restore diagnostics. CI exercises the local-archive CLI against actual disposable PostgreSQL databases; the independent provider download is contract-tested with an injected object client. Neither check claims that a real bucket was accessed or establishes a production RPO/RTO.
 
 ## Opt-in scheduled Compose backups
 
@@ -138,4 +157,8 @@ The example schedule is 03:00 UTC daily and intentionally does not replay a miss
 
 Before stopping services, the wrapper verifies that jobs have drained. If jobs remain, it fails without stopping anything. It records which of `api`, `worker`, `interactive-worker`, and `scheduler` are running, stops only that set, captures and verifies the archive, and restarts that same set. An exit/interrupt/termination handler also attempts restart after a failed capture or partial service stop. A job admitted between the preflight check and shutdown makes the capture fail safely; the original services are restarted and the operator can retry. A host crash, forced process kill, Docker outage, or failed restart still requires operator intervention and alerting.
 
-Optional S3 upload begins after application services restart, using the archive adapter's version-aware receipt and integrity checks. A provider failure leaves the verified local archive available but makes the service fail: it is not a successful off-host recovery point. The wrapper never deletes archives, removes volumes, restores a database, or drops a database. Configure archive/bucket retention and monitoring separately, with alerts for systemd failures, failed restarts, oldest verified backup age, and disk capacity. No real cloud bucket, credentials, systemd unit, or paid infrastructure is provisioned by merely adding these repository files.
+The schedule now requires an independent S3 destination by default and refuses to stop services when none is configured. An explicit `DATAFLOW_BACKUP_REQUIRE_REMOTE=false` is available for a local-only rehearsal; its result is labeled `local_only`, not an independent recovery point.
+
+S3 upload begins after application services restart, using the archive adapter's version-aware receipt and integrity checks. A provider failure leaves the verified local archive available but makes the service fail: it is not a successful off-host recovery point. Only a completed run writes a unique `*.completed.json` with completion time and `independent_copy_uploaded` or `local_only`. The remote receipt preserves the inventory independently of this host.
+
+The wrapper never deletes archives, removes volumes, restores a database, or drops a database. Configure archive/bucket retention and monitoring separately, with alerts for systemd failures, failed restarts, age of the latest independent completion, and disk capacity. A successful upload's metadata checks do not replace a later downloaded, verified restore. No real cloud bucket, credentials, systemd unit, or paid infrastructure is provisioned by merely adding these repository files. The timer runs on the application's Compose host; it is not compatible with Render's exclusive service disk. See [Rollout](ROLLOUT.md#render-storage-and-backup-boundary).

@@ -50,6 +50,11 @@ def test_parquet_aggregation_matches_pandas_null_zero_and_filters(tmp_path, aggr
     path = tmp_path / "source.parquet"
     frame.to_parquet(path, index=False)
     definition = chart(aggregation=aggregation, chart_type=chart_type)
+    if chart_type == "pie" and aggregation not in {"sum", "count"}:
+        for calculate in (lambda: query_parquet(path, definition), lambda: DashboardService._build_pandas_chart(frame, definition)):
+            with pytest.raises(ValueError, match="sum or count only"):
+                calculate()
+        return
     expected = json_value(DashboardService._build_pandas_chart(frame, definition))
     assert query_parquet(path, definition) == expected
     definition.filters_json = {"revenue": {"gte": 0, "lte": 2.002}}
@@ -73,12 +78,16 @@ def test_parquet_queries_quote_columns_bind_values_and_keep_contains_literal(tmp
     definition = chart(x_column=column, y_column="value", filters_json={column: {"eq": "a.b"}})
     result = query_parquet(path, definition)
     assert result == {"labels": ["a.b"], "values": [1], "rows": [], "total_count": 1,
-                      "returned_count": 1, "truncated": False, "omitted_count": 0, "grouped_count": 0}
+                      "returned_count": 1, "truncated": False, "omitted_count": 0, "grouped_count": 0,
+                      "aggregation": "sum", "value_column": "value", "group_column": column,
+                      "source_row_count": 1, "valid_value_count": 1}
     definition.filters_json = {column: {"contains": "."}}
     assert query_parquet(path, definition) is None
     assert DashboardService._build_pandas_chart(frame, definition) == {
         "labels": ["A.B", "a.b"], "values": [2, 1], "rows": [],
         "total_count": 2, "returned_count": 2, "truncated": False, "omitted_count": 0, "grouped_count": 0,
+        "aggregation": "sum", "value_column": "value", "group_column": column,
+        "source_row_count": 2, "valid_value_count": 2,
     }
 
 

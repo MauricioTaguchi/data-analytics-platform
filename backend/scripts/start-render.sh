@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-alembic upgrade head
+# Migrations and grants run separately with an operator identity. Runtime never
+# receives that identity and fails closed until the schema and role are ready.
+python scripts/check_runtime.py
 celery -A app.worker.celery_app worker --loglevel=info --queues interactive,bulk &
 worker_pid=$!
 python -m app.scheduler &

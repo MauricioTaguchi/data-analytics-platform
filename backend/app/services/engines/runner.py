@@ -225,13 +225,23 @@ def run_profile(
     )
 
 
-def run_dataset_preview(snapshot: SnapshotRef, page: int, page_size: int, policy: ResourcePolicy) -> dict:
+def run_dataset_preview(
+    snapshot: SnapshotRef, page: int, page_size: int, policy: ResourcePolicy, *, cache_metadata: dict | None = None,
+) -> dict:
     """Return a bounded JSON page; dataframes never enter the API process."""
-    return _run_metadata("dataset_preview", snapshot, policy, None, page=page, page_size=page_size)
+    return _run_metadata(
+        "dataset_preview", snapshot, policy, None, page=page, page_size=page_size, cache_metadata=cache_metadata,
+    )
 
 
-def run_inspection(snapshot: SnapshotRef, policy: ResourcePolicy, checkpoint=None) -> dict:
-    return _run_metadata("inspection", snapshot, policy, checkpoint)
+def run_inspection(
+    snapshot: SnapshotRef, policy: ResourcePolicy, checkpoint=None, *, build_preview_cache: bool = False,
+    expected_sha256: str | None = None, expected_size_bytes: int | None = None,
+) -> dict:
+    return _run_metadata(
+        "inspection", snapshot, policy, checkpoint, build_preview_cache=build_preview_cache,
+        expected_sha256=expected_sha256, expected_size_bytes=expected_size_bytes,
+    )
 
 
 def run_preview(
@@ -285,6 +295,14 @@ def _child_dispatch(payload: dict, policy: ResourcePolicy) -> dict:
     settings.MAX_DATASET_COLUMN_NAME_CHARS = policy.max_column_name_chars
     snapshot = SnapshotRef(Path(payload["input_path"]))
     kind = payload["kind"]
+    if kind == "dataset_preview" and payload.get("cache_metadata") is not None:
+        from app.services.preview_cache_service import PreviewCacheService
+
+        cached = PreviewCacheService.read_verified_page(
+            snapshot.path, payload["cache_metadata"], payload["page"], payload["page_size"],
+        )
+        if cached is not None:
+            return cached
     if kind == "quality":
         from app.services.quality_service import evaluate_quality
 
@@ -313,9 +331,14 @@ def _child_dispatch(payload: dict, policy: ResourcePolicy) -> dict:
                 verify_profile_source()
             return result
         if kind == "dataset_preview":
-            return DatasetService._preview_page_in_child(source, payload["page"], payload["page_size"])
+            return DatasetService._preview_page_in_child(
+                source, payload["page"], payload["page_size"], cache_metadata=payload.get("cache_metadata"),
+            )
         if kind == "inspection":
-            return DatasetService.inspect_staged_dataset(source)
+            return DatasetService.inspect_staged_dataset(
+                source, build_preview_cache=payload.get("build_preview_cache", False),
+                expected_sha256=payload.get("expected_sha256"), expected_size_bytes=payload.get("expected_size_bytes"),
+            )
         class ChildAdapter:
             def materialize(self, snapshot, plan, output_path, policy, checkpoint=None):
                 return _materialize_in_child(

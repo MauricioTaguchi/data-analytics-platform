@@ -32,6 +32,8 @@ class S3BackupStore:
 
     def upload(self, archive: Path) -> dict:
         verify_archive(archive)
+        if self.client.get_bucket_versioning(Bucket=self.bucket).get("Status") != "Enabled":
+            raise RecoveryError("The independent backup bucket must have versioning enabled.")
         digest, size = sha256_file(archive)
         key = f"{self.prefix}/{datetime.now(timezone.utc):%Y/%m/%d}/{uuid4().hex}.tar"
         extra = {"Metadata": {"sha256": digest}, "ServerSideEncryption": "AES256", "ContentType": "application/x-tar"}
@@ -43,8 +45,25 @@ class S3BackupStore:
         observed = self.client.head_object(Bucket=self.bucket, Key=key)
         if observed["ContentLength"] != size or observed.get("Metadata", {}).get("sha256") != digest:
             raise RecoveryError("The uploaded object does not match its expected metadata.")
-        return {"bucket": self.bucket, "key": key, "version_id": observed.get("VersionId"),
-                "sha256": digest, "size_bytes": size}
+        version = observed.get("VersionId")
+        if not version or version == "null":
+            raise RecoveryError("The backup provider did not return an immutable version identity.")
+        receipt = {"bucket": self.bucket, "key": key, "version_id": version,
+                   "sha256": digest, "size_bytes": size,
+                   "uploaded_at": datetime.now(timezone.utc).isoformat()}
+        # A host loss must not destroy the only inventory of its independent copy.
+        receipt_key = key + ".receipt.json"
+        receipt_options = {name: value for name, value in extra.items()
+                           if name in {"ServerSideEncryption", "SSEKMSKeyId"}}
+        stored_receipt = self.client.put_object(
+            Bucket=self.bucket, Key=receipt_key,
+            Body=json.dumps(receipt, sort_keys=True).encode("utf-8"),
+            ContentType="application/json", **receipt_options,
+        )
+        receipt_version = stored_receipt.get("VersionId")
+        if not receipt_version or receipt_version == "null":
+            raise RecoveryError("The independent receipt was not stored as a versioned object.")
+        return {**receipt, "receipt_key": receipt_key, "receipt_version_id": receipt_version}
 
     def download(self, receipt: dict, destination: Path, *, max_bytes: int = 100 * 1024**3) -> None:
         if receipt.get("bucket") != self.bucket or not receipt.get("key", "").startswith(f"{self.prefix}/"):

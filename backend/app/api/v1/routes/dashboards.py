@@ -4,6 +4,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.chart import Chart
 from app.models.dashboard import Dashboard
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.dashboard import (
     ChartCreate,
@@ -89,7 +90,13 @@ def chart_data(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    chart = db.query(Chart).filter(Chart.id == chart_id).first()
+    chart = (
+        db.query(Chart)
+        .join(Dashboard, Dashboard.id == Chart.dashboard_id)
+        .join(Project, Project.id == Dashboard.project_id)
+        .filter(Chart.id == chart_id, Project.owner_id == user.id)
+        .first()
+    )
     if not chart:
         raise HTTPException(status_code=404, detail="Chart not found.")
     try:

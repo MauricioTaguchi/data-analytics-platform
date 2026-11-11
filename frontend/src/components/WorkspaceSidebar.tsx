@@ -69,11 +69,11 @@ export function WorkspaceSidebar(props: Props) {
         </div>)}
       </nav>
       <div className="sidebar-footer">
-        <div className="sidebar-footer-heading"><strong>{props.live ? "API WORKSPACE" : "DEMO WORKSPACE"}</strong><p>{props.live ? "Connected data environment" : "Local preview environment"}</p></div>
-        <div className="sidebar-environment"><span className={props.live ? "environment-dot is-live" : "environment-dot is-demo"} /><div className="environment-copy"><span className="environment-label">Environment</span><strong className="environment-value">{props.live ? "Authenticated API" : "Local preview"}</strong></div></div>
+        <div className="sidebar-footer-heading"><strong>{props.live ? "YOUR WORKSPACE" : "SAMPLE WORKSPACE"}</strong><p>{props.live ? "Your work is saved in your account" : "Explore without an account"}</p></div>
+        <div className="sidebar-environment"><span className={props.live ? "environment-dot is-live" : "environment-dot is-demo"} /><div className="environment-copy"><span className="environment-label">Workspace</span><strong className="environment-value">{props.live ? "Signed in" : "Sample preview"}</strong></div></div>
         <div className="sidebar-actions">
-          <button className="sidebar-action sidebar-action-primary" disabled={props.busy} onClick={changeConnection}><WorkspaceIcon name="chevron" size={17} />{props.live ? "Sign out" : "Connect API"}</button>
-          <button className="sidebar-action" disabled={props.busy} onClick={props.onCheckApi}><WorkspaceIcon name="monitoring" size={17} />{props.busy ? "Working…" : "Check health"}</button>
+          <button className="sidebar-action sidebar-action-primary" disabled={props.busy} onClick={changeConnection}><WorkspaceIcon name="chevron" size={17} />{props.live ? "Sign out" : "Sign in"}</button>
+          <button className="sidebar-action" disabled={props.busy} onClick={props.onCheckApi}><WorkspaceIcon name="monitoring" size={17} />{props.busy ? "Working…" : "Check service"}</button>
         </div>
       </div>
     </aside>

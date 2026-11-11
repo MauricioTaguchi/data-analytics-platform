@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { buildLocalChartData, ChartVisual, InteractiveRequestFence } from "./DashboardWorkspace";
+import { buildLocalChartData, ChartMetricSummary, ChartVisual, InteractiveRequestFence } from "./DashboardWorkspace";
 
 const rows = [
   { category: "Computers", total: 200 },
@@ -10,6 +10,51 @@ const rows = [
 ];
 
 describe("DashboardWorkspace", () => {
+  it.each(["mean", "min", "max"] as const)("rejects non-additive %s pie slices in calculation and display", (aggregation) => {
+    expect(() => buildLocalChartData(rows, "category", "total", aggregation, "pie")).toThrow("sum or count only");
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: ["A", "B"], values: [10, 100], rows: [], aggregation }} type="pie" />);
+    expect(markup).toContain("Choose an additive measure");
+    expect(markup).not.toContain("conic-gradient");
+  });
+
+  it("explains category means using the original row denominator and source unit", () => {
+    const observations = [{ x: "A", y: 10 }, { x: "A", y: 10 }, { x: "A", y: 10 }, { x: "A", y: 10 }, { x: "B", y: 100 }, { x: "B", y: null }];
+    const categories = buildLocalChartData(observations, "x", "y", "mean");
+    const overall = buildLocalChartData(observations, "x", "y", "mean", "kpi");
+    expect(categories.values).toEqual([10, 100]);
+    expect(overall.values).toEqual([28]);
+    expect(categories).toMatchObject({ source_row_count: 6, valid_value_count: 5, omitted_count: 1 });
+    const markup = renderToStaticMarkup(<ChartMetricSummary data={categories} type="bar" />);
+    expect(markup).toContain("calculated separately for each x");
+    expect(markup).toContain("source unit of y");
+    expect(markup).toContain("Each usable source row has equal weight");
+    expect(markup).toContain("5 recorded values used");
+    expect(markup).toContain("1 missing or non-finite measure values excluded");
+  });
+
+  it("counts non-null text cells and duplicates consistently with the API", () => {
+    const observations = [{ x: "A", y: "same" }, { x: "A", y: "same" }, { x: "A", y: "" }, { x: "A", y: null }];
+    const data = buildLocalChartData(observations, "x", "y", "count");
+    expect(data.values).toEqual([3]);
+    expect(buildLocalChartData(observations, "x", "y", "count", "kpi").values).toEqual([3]);
+    expect(data).toMatchObject({ valid_value_count: 3, omitted_count: 1 });
+    expect(renderToStaticMarkup(<ChartMetricSummary data={data} type="bar" />)).toContain("duplicates count separately");
+  });
+
+  it("distinguishes no matching rows from an all-missing measure", () => {
+    const empty = buildLocalChartData([], "x", "y", "mean", "kpi");
+    expect(renderToStaticMarkup(<ChartVisual data={empty} type="kpi" />)).toContain("No matching rows");
+    const missing = buildLocalChartData([{ x: "A", y: null }], "x", "y", "sum", "kpi");
+    expect(missing.values).toEqual([0]);
+    expect(renderToStaticMarkup(<ChartMetricSummary data={missing} type="kpi" />)).toContain("A zero sum or count does not mean a measured value of zero");
+  });
+
+  it("reports non-finite numeric omissions and rejects them for a pie", () => {
+    const observations = [{ x: "A", y: 10 }, { x: "A", y: Number.POSITIVE_INFINITY }, { x: "A", y: null }];
+    expect(buildLocalChartData(observations, "x", "y", "mean")).toMatchObject({ values: [10], source_row_count: 3, valid_value_count: 1, omitted_count: 2 });
+    expect(() => buildLocalChartData(observations, "x", "y", "sum", "pie")).toThrow("finite, non-negative");
+  });
+
   it("preserves boolean KPI reductions without accepting boolean scatter coordinates", () => {
     const flags = [{ x: 1, flag: true }, { x: 2, flag: false }, { x: 3, flag: null }];
     expect(buildLocalChartData(flags, "x", "flag", "sum", "kpi").values).toEqual([1]);

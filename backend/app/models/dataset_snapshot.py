@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, event, inspect
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, event, inspect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -18,6 +18,8 @@ class DatasetSnapshot(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    preview_cache_json: Mapped[dict | None] = mapped_column(JSON, nullable=True, deferred=True)
+    preview_cache_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     availability: Mapped[str] = mapped_column(String(20), nullable=False, default="AVAILABLE", server_default="AVAILABLE")
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
