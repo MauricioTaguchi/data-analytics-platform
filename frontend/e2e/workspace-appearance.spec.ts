@@ -118,11 +118,11 @@ test("workspace navigation, responsive layout, and persistent themes remain usab
 
   const menu = page.getByRole("button", { name: "Open menu", exact: true });
   if (isMobile) await menu.click();
-  const connect = page.getByRole("button", { name: "Connect API", exact: true });
+  const connect = page.getByRole("button", { name: "Sign in", exact: true });
   await connect.click();
-  const connection = page.getByRole("dialog", { name: "Connect to the production workflow", exact: true });
-  await expect(connection.getByRole("textbox", { name: "Name", exact: true })).toBeFocused();
-  const submit = connection.getByRole("button", { name: "Create and connect", exact: true });
+  const connection = page.getByRole("dialog", { name: "Sign in to DataFlow", exact: true });
+  await expect(connection.getByRole("textbox", { name: "Email", exact: true })).toBeFocused();
+  const submit = connection.locator("form").getByRole("button", { name: "Sign in", exact: true });
   await submit.focus();
   await page.keyboard.press("Tab");
   await expect(connection.getByRole("button", { name: "Close", exact: true })).toBeFocused();

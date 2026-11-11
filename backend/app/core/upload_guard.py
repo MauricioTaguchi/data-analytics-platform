@@ -110,15 +110,12 @@ def _access_subject(scope: Scope) -> int | None:
 
 
 def _client_fingerprint(scope: Scope) -> str:
+    # The ASGI server resolves forwarded headers only for configured trusted
+    # peers. Reading the raw header here would bypass that trust boundary.
     address = "unknown"
-    if settings.TRUST_PROXY_HEADERS:
-        forwarded = _single_header(scope, b"x-forwarded-for") or ""
-        if forwarded:
-            address = forwarded.split(",", 1)[0].strip()[:128] or "unknown"
-    if address == "unknown":
-        client = scope.get("client")
-        if isinstance(client, tuple) and client:
-            address = str(client[0])[:128]
+    client = scope.get("client")
+    if isinstance(client, tuple) and client:
+        address = str(client[0])[:128]
     return new_hmac(
         settings.SECRET_KEY.encode("utf-8"),
         address.encode("utf-8"),

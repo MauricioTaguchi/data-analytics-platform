@@ -6,8 +6,11 @@
 - Reuse of an unexpired, consumed refresh token revokes its entire session family, including the successor. Logout revokes that family; independent logins remain independent. Rotation and replay are serialized per account. Clients must share one in-flight refresh request. Existing access tokens remain valid until expiration; family revocation prevents renewal.
 - Migration preserves active legacy refresh tokens, assigning each recorded token an independent family. It cannot reconstruct relationships that were never recorded before migration.
 - Refresh sessions are persisted by `jti` and can be revoked at logout.
+- Password recovery uses expiring, single-use random links. Only token digests are stored; SMTP delivery uses verified TLS in production. Reset requests use a uniform response, an account-keyed cooldown, and the shared authentication rate limit. Successful recovery increments an account authentication version and revokes refresh sessions and outstanding recovery links, invalidating already-issued access tokens as well.
+- Recovery mail is delivered after the HTTP response. Delivery is not a durable queue: a process interruption can require a new request. SMTP acceptance does not prove inbox delivery. Configure and test the actual sender, recipient delivery, reset origin, and provider limits before enabling recovery for users.
 - Passwords require at least 10 characters with letters and numbers and are hashed with bcrypt.
 - Authentication and upload attempts are rate-limited through shared Redis counters; upload checks run before multipart parsing.
+- Rate-limit identities use the client address resolved by the ASGI server, never an independently parsed raw forwarded header. Configure Uvicorn's `FORWARDED_ALLOW_IPS` for the actual trusted proxy peers; the legacy `TRUST_PROXY_HEADERS` setting no longer enables application-level header trust. An unrestricted trust list is inappropriate when clients can reach the server directly or supply unsanitized forwarding headers.
 - Dataset queries join through project ownership and return `404` across tenant boundaries.
 - Upload admission rejects oversized declared or streamed request bodies before they can grow an unbounded multipart spool, limits simultaneous receive streams per API process, and prechecks active-job capacity for a cryptographically valid access-token subject before reading the body. Full user authentication still occurs in the route dependency, and the route's locked job creation remains the authoritative race-safe admission.
 - Non-upload POST, PUT, PATCH, and DELETE bodies have a separate configurable limit that checks both `Content-Length` and actual streamed bytes before each chunk reaches FastAPI parsing.
@@ -41,5 +44,13 @@
 - Define backup access, retention, restoration tests, and incident ownership for the selected platform. Run the supplied backup verification/isolated restore procedure before accepting recovery objectives; verify S3 bucket versioning and encryption if using the archive destination.
 
 These controls are production-minded safeguards, not a certification or independent security assessment. See [Known limitations](LIMITATIONS.md).
+
+## Review evidence and remaining external checks
+
+The product-readiness review added a public-API tenant-boundary matrix covering projects, datasets, previews, profiles, exports, event history, undo, snapshots, quality, jobs, reports, and dashboards. It verifies denied requests do not change stored content or job state. Foreign chart identifiers now receive the same response as unknown identifiers; foreign project dataset lists return a controlled not-found response. Proxy-trust tests exercise forged headers and trusted/untrusted peer resolution. These repository tests do not establish the configuration of an external deployment.
+
+Before a public pilot, a reviewer outside the implementation team should receive a staging URL, two disposable accounts, a revision identifier, and an agreed scope. Ask them to verify tenant isolation, session/reset invalidation, malformed and oversized uploads, dependency findings, runtime database privileges, TLS/proxy configuration, secret handling, protected file storage, and backup access. Use synthetic data and agree on limits before any load or destructive testing. Record findings, fixes, and retests; do not describe this internal review as an independent penetration test.
+
+Primary references: [OWASP recovery guidance](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html), [OWASP file upload guidance](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html), and [Uvicorn proxy trust](https://uvicorn.dev/deployment/).
 
 Report vulnerabilities privately through GitHub's **Report a vulnerability** flow when it is enabled for the repository. Do not open a public issue containing exploit details, credentials, personal data, or live service information.

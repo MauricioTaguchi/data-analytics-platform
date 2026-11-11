@@ -20,6 +20,7 @@ from app.services.job_service import (
     JobStateConflict,
 )
 from app.services.storage_service import storage
+from app.services.snapshot_service import SnapshotService
 from app.worker import celery_app
 
 
@@ -238,10 +239,14 @@ def import_dataset_task(self, dataset_id: int):
             stage="validating",
         )
         dataset_snapshot = SimpleNamespace(stored_path=str(dataset.stored_path))
+        manifest = SnapshotService.manifest(db, dataset_id, dataset_snapshot.stored_path)
+        manifest_identity = (manifest.sha256, manifest.size_bytes) if manifest else (None, None)
         db.commit()
         dimensions = run_inspection(
             SnapshotRef(Path(dataset_snapshot.stored_path)), ResourcePolicy.configured(),
             checkpoint=lambda: _lease_checkpoint(db, task_id, attempt_token),
+            build_preview_cache=manifest is not None,
+            expected_sha256=manifest_identity[0], expected_size_bytes=manifest_identity[1],
         )
         _lease_checkpoint(db, task_id, attempt_token)
         dataset = (
@@ -259,6 +264,15 @@ def import_dataset_task(self, dataset_id: int):
             progress=80,
             stage="persisting",
         )
+        if dataset.stored_path != dataset_snapshot.stored_path:
+            raise ValueError("Dataset changed during import finalization.")
+        cache = dimensions.get("preview_cache")
+        if cache is not None:
+            manifest = SnapshotService.manifest(db, dataset_id, dataset_snapshot.stored_path, lock=True)
+            if manifest is None or manifest.availability != "AVAILABLE":
+                raise ValueError("The import snapshot is no longer available.")
+            manifest.preview_cache_json = cache["body"]
+            manifest.preview_cache_sha256 = cache["sha256"]
         dataset.row_count = dimensions["rows"]
         dataset.column_count = dimensions["columns"]
         dataset.status = "ready"

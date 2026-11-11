@@ -509,8 +509,12 @@ class DatasetService:
             raise
 
     @classmethod
-    def inspect_staged_dataset(cls, dataset: StoredSnapshot) -> dict:
+    def inspect_staged_dataset(
+        cls, dataset: StoredSnapshot, *, build_preview_cache: bool = False,
+        expected_sha256: str | None = None, expected_size_bytes: int | None = None,
+    ) -> dict:
         path = Path(dataset.stored_path)
+        identity = cls._verify_preview_source(path, expected_sha256, expected_size_bytes)
         try:
             dataframe = cls.read_dataframe(path)
         except Exception as exc:
@@ -518,7 +522,29 @@ class DatasetService:
         cls.validate_dataframe_structure(dataframe)
         if dataframe.shape[0] > settings.MAX_DATASET_ROWS:
             raise ValueError(f"Datasets are limited to {settings.MAX_DATASET_ROWS:,} rows.")
-        return {"rows": int(dataframe.shape[0]), "columns": int(dataframe.shape[1])}
+        result: dict[str, Any] = {"rows": int(dataframe.shape[0]), "columns": int(dataframe.shape[1])}
+        if build_preview_cache and identity is not None and path.suffix.lower() != ".parquet":
+            from app.services.preview_cache_service import PreviewCacheService
+
+            cache = PreviewCacheService.build(
+                dataframe, source_sha256=identity.sha256, source_size_bytes=identity.size_bytes,
+            )
+            if cache is not None:
+                result["preview_cache"] = cache
+        if identity is not None:
+            identity.assert_unchanged(path)
+            cls._verify_preview_source(path, identity.sha256, identity.size_bytes)
+        return result
+
+    @staticmethod
+    def _verify_preview_source(path: Path, expected_sha256: str | None, expected_size_bytes: int | None):
+        if expected_sha256 is None and expected_size_bytes is None:
+            return None
+        identity = SnapshotService.digest(path)
+        if ((expected_sha256 is not None and identity.sha256 != expected_sha256)
+                or (expected_size_bytes is not None and identity.size_bytes != expected_size_bytes)):
+            raise ValueError("The dataset snapshot failed integrity verification.")
+        return identity
 
     @classmethod
     def preview(cls, dataset: ReadySnapshot, page: int, page_size: int) -> dict:
@@ -536,14 +562,41 @@ class DatasetService:
             max_spill_bytes=0,
         )
         with _preview_slot():
+            metadata = getattr(dataset, "preview_cache", None)
+            if metadata is not None:
+                return run_dataset_preview(
+                    SnapshotRef(Path(dataset.stored_path)), page, page_size, policy, cache_metadata=metadata,
+                )
             return run_dataset_preview(SnapshotRef(Path(dataset.stored_path)), page, page_size, policy)
 
     @classmethod
-    def _preview_page_in_child(cls, dataset: StoredSnapshot, page: int, page_size: int) -> dict:
+    def _preview_page_in_child(
+        cls, dataset: StoredSnapshot, page: int, page_size: int, *, cache_metadata: dict | None = None,
+    ) -> dict:
+        if cache_metadata is None:
+            return cls._read_preview_page_in_child(dataset, page, page_size)
+        from app.services.preview_cache_service import PreviewCacheService
+
+        path = Path(dataset.stored_path)
+        identity = cls._verify_preview_source(
+            path, cache_metadata.get("source_sha256"), cache_metadata.get("source_size_bytes"),
+        )
+        # A cache never outlives or supersedes its original bytes. Integrity is
+        # checked in the supervised child even when no parser is required.
+        result = PreviewCacheService.page(cache_metadata, page, page_size) if identity is not None else None
+        if result is None:
+            result = cls._read_preview_page_in_child(dataset, page, page_size)
+        if identity is not None:
+            identity.assert_unchanged(path)
+            cls._verify_preview_source(path, identity.sha256, identity.size_bytes)
+        return result
+
+    @classmethod
+    def _read_preview_page_in_child(cls, dataset: StoredSnapshot, page: int, page_size: int) -> dict:
         """Read one presentation page inside the resource-limited subprocess.
 
-        Parquet decodes projected batches only. The original CSV/Excel/JSON
-        formats still require their existing parser's whole-column inference;
+        Parquet decodes projected batches only. For cache misses and later API
+        pages, original CSV/Excel/JSON formats require whole-column inference;
         these parsers are isolated, not advertised as streaming pagination.
         Their input, row count, execution time and RSS budgets remain enforced.
         """

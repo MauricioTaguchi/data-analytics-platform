@@ -100,3 +100,51 @@ python ops/http_probe.py --requests 300 --concurrency 6 \
 Allocated workload cost is `hourly_cost × wall_seconds / 3600`; cost per successful request divides that value by successful requests and is null when none succeed. Decide explicitly whether the input includes API, workers, database, cache, storage, monitoring and idle capacity. Variable egress, storage growth and provider minimum charges need separate accounting. A readiness-path allocation is not the cost of processing a dataset.
 
 Before claiming a production budget or capacity, repeat representative upload → profile → transform → preview → report journeys at increasing concurrency with known fixture sizes, collect whole-service memory/CPU and storage metrics, retain failed-request details in secured logs, and record the actual deployment limits and provider charges. No production latency, cost, notification delivery, or recovery objective is established by the new local/CI checks.
+
+## Checked HTTP journeys across file formats
+
+[`app.operations.workload`](../backend/app/operations/workload.py) exercises the running API and actual asynchronous jobs. Its dedicated [Checked HTTP workload workflow](../.github/workflows/workload.yml) starts an isolated PostgreSQL database, Redis, one API process, a two-process Celery worker serving both queues, and the recovery scheduler. Every run uploads JSON evidence, records the effective non-secret deployment settings, and prints a bounded per-format summary with the source hash and hardware description. The workflow runs eight journeys at concurrency two, with 10,000 rows per input (80,000 uploaded rows across four formats). Passing it establishes correctness for that measured workload; it is not a throughput limit, production capacity guarantee, latency objective, or provider cost estimate.
+
+Run against a **disposable environment you control**, with backend development dependencies installed:
+
+```bash
+cd backend
+python -m app.operations.workload \
+  --base-url http://127.0.0.1:8000 \
+  --rows 128 --concurrency 2 --iterations 1 \
+  --formats csv json xlsx parquet \
+  --duration-limit 420 --job-timeout 90 \
+  --revision "$(git rev-parse HEAD)" \
+  --output /tmp/dataflow-workload.json
+```
+
+Each format contains the same deterministic four-column data: repeated rows, null numeric values, quoted commas, Unicode and embedded newlines. CSV/JSON/Parquet serialization is deterministic for the recorded dependencies; XLSX ZIP timestamps and workbook creation dates are normalized. Evidence includes both the file SHA-256 and a canonical logical-data SHA-256. There are no large committed input files.
+
+Each journey registers a distinct synthetic account, logs out, logs in, creates a project, uploads a fixture, checks the imported dimensions and preview values, profiles it, previews and applies duplicate removal, repeats the transformation request to verify idempotency, generates a report, and downloads its PDF. It then logs out, proves that the refresh token was revoked, logs back in, reopens the project and dataset, verifies the export again, and undoes the transformation. Assertions check all exported rows, column order, values and nulls; the original byte digest after undo; profile duplicate counts; transformation preview rows; report revision and source digest; and project/dataset persistence. PDF validation checks its signature and recorded input provenance; visual layout is outside this harness.
+
+| Recorded evidence | Measurement boundary |
+| --- | --- |
+| Per-request and per-operation p50/p95/p99, samples, statuses and unexpected failures | Successful requests include reading the bounded response body. Unexpected HTTP statuses finish at headers. HTTP connections are reused within each journey. Expected 401 responses test refresh revocation and count as successful checks, not unexpected errors. |
+| Journey latency and successful journeys/second | Registration, all steps, worker queueing, polling, and cleanup are included. The pool has fixed bounded concurrency; it does not generate a controlled arrival rate or find a saturation point. |
+| Job wait times | Start after the admission response and include polling delay. Admission request latency is recorded separately. A terminal failed job or wrong result fails the journey even when all HTTP responses were 200. |
+| Fixture identity and exact correctness results | All formats must produce the expected logical table. Export parsing accepts equivalent numeric dtypes across file formats but compares exact values, row order, columns and nulls. |
+| Driver hardware, source fingerprint and supplied deployment revision | CPU model, affinity, cgroup limits, OS, Python and dependency versions describe the process running the driver. `--server-on-driver-host` records an explicit assertion that API/workers share that host; the CI workflow supplies it. It does not measure whole-service utilization or database/Redis container allocation. A supplied remote revision is not independently attested. |
+| Optional cost allocation | With both `--hourly-cost` and `--currency`, allocate the supplied infrastructure price over measured workload wall time. Cost defaults to `null`; setup, idle capacity, variable storage, network fees and a provider bill are not measured. No price is guessed. |
+
+Acceptance requires every journey and its supported cleanup actions to succeed. The command writes the report before returning exit code 1 for workload failure. There is deliberately no timing threshold inferred from a small synthetic sample. Credentials, tokens, response bodies and exception messages are excluded from evidence; format, operation and fixed error categories identify failures.
+
+Limits are explicit: 16–10,000 rows per file, at most eight concurrent journeys, 64 total journeys, 8 MiB per upload/response, 20,000 ordinary HTTP requests, 30 seconds per request, 180 seconds per job and 900 seconds of workload admission. The default ordinary request budget is 5,000. Deadline checks stop new work; already-running calls remain subject to their socket timeout. Cleanup has separate bounded requests so exhausting the normal budget does not prevent cancellation or logout. Cleanup can extend elapsed time beyond the admission deadline.
+
+The harness cancels unfinished jobs, deletes generated reports and revokes its refresh sessions. **The current API has no project, dataset or account deletion endpoint.** Their rows, source files and history remain until the disposable deployment is destroyed; counts are reported explicitly. CI stops the created process groups, removes its upload/report directories, and GitHub destroys its job-scoped database/Redis containers. Against another deployment, its owner must reclaim those resources. Do not run this workload on a production account or mistake successful logout for complete data deletion.
+
+To discuss capacity by hardware, retain the CI run URL, measured source hash, actual machine record, deployment settings, workload dimensions, concurrency, timings and failures together. Increase one workload dimension at a time on the same allocated hardware and repeat samples. No end-to-end reference numbers are published here until a real deployed run has completed; unit tests and the in-process API test establish correctness only.
+
+### Resource use during the HTTP workload
+
+The dedicated workflow runs [`sample_workload_resources.py`](../backend/scripts/sample_workload_resources.py) alongside the HTTP driver. It observes the API, Celery worker and scheduler process trees through Linux `/proc`, using PID plus process start time as identity. The evidence records current process counts, summed RSS, observed CPU deltas and cumulative CPU seconds per tree, plus peak observed values. CPU deltas from observed processes remain in the total after those processes exit; PID reuse cannot transfer a previous process's membership to an unrelated process. A newly observed child contributes its CPU since birth, while the first sample establishes the existing processes' baseline. Command lines and environment variables are never read.
+
+Summed RSS is **not USS**: shared pages can be counted repeatedly between processes. CPU percentages use one fully occupied core as 100%, so multi-process totals can exceed 100%. Processes born and exited between samples, unobserved final CPU increments, and children never seen before reparenting are missed. These are sampled observations, not hard memory ceilings or complete CPU accounting.
+
+PostgreSQL and Redis service containers are sampled separately with bounded `docker stats --no-stream` calls. Their Docker CPU percentages, used memory and memory limits are retained as separate metrics; Docker's memory accounting is not directly additive to process RSS. Sampling requests are one second apart after collection; Docker collection can extend the actual interval, which is visible in each sample's timestamp. The sampler has a 900-second ceiling, three-second Docker call timeout, signal handling and a stop file. It saves `resources.json` and prints `WORKLOAD_RESOURCES` before application teardown. CI fails if a selected process tree or container has no observations.
+
+The resource window includes the short interval before and after HTTP execution; UTC timestamps allow alignment with `evidence.json`. Compare the recorded allocation, workload, sampled usage and correctness together. This measures the selected test processes and containers on the identified CI host; it does not establish production capacity, an OOM-safe limit, or maximum sustainable concurrency.

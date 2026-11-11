@@ -81,6 +81,13 @@ class ObjectClient:
         self.objects = {}
         self.requests = []
 
+    def get_bucket_versioning(self, Bucket):
+        return {"Status": "Enabled"}
+
+    def put_object(self, **request):
+        self.requests.append(request)
+        return {"VersionId": "receipt-v1"}
+
     def upload_file(self, path, bucket, key, ExtraArgs):
         self.objects[(bucket, key)] = (Path(path).read_bytes(), ExtraArgs)
 
@@ -99,6 +106,10 @@ def test_s3_backup_round_trip_validates_checksum_and_pins_version(tmp_path):
     store = S3BackupStore(client, "private-backups", kms_key="managed-key")
     source = archive_fixture(tmp_path / "backup.tar")
     receipt = store.upload(source)
+    assert receipt["receipt_version_id"] == "receipt-v1"
+    remote_receipt = json.loads(client.requests[-1]["Body"])
+    assert remote_receipt["sha256"] == receipt["sha256"]
+    assert remote_receipt["version_id"] == "v1"
     extra = client.objects[(receipt["bucket"], receipt["key"])][1]
     assert extra["ServerSideEncryption"] == "aws:kms"
     assert extra["SSEKMSKeyId"] == "managed-key"
@@ -108,6 +119,23 @@ def test_s3_backup_round_trip_validates_checksum_and_pins_version(tmp_path):
     assert client.requests[-1]["VersionId"] == "v1"
     with pytest.raises(RecoveryError, match="already exists"):
         store.download(receipt, restored)
+
+
+def test_s3_upload_rejects_unversioned_or_suspended_destination_before_writing(tmp_path):
+    source = archive_fixture(tmp_path / "backup.tar")
+    for status in (None, "Suspended"):
+        client = ObjectClient()
+        client.get_bucket_versioning = lambda status=status, **_: {"Status": status}
+        with pytest.raises(RecoveryError, match="versioning"):
+            S3BackupStore(client, "private-backups").upload(source)
+        assert not client.objects
+
+
+def test_s3_receipt_is_not_issued_when_provider_loses_version_identity(tmp_path):
+    client = ObjectClient()
+    client.put_object = lambda **_: {}
+    with pytest.raises(RecoveryError, match="receipt"):
+        S3BackupStore(client, "private-backups").upload(archive_fixture(tmp_path / "backup.tar"))
 
 
 def test_s3_corruption_fails_without_publishing_download(tmp_path):

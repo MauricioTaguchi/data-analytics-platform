@@ -45,6 +45,29 @@ class QueryGate:
 query_gate = QueryGate()
 
 
+def metric_result(result, chart, source_row_count, valid_value_count):
+    """Describe the filtered population and the observations used by the metric."""
+    kind = chart.chart_type
+    aggregation = (None if kind in {"scatter", "table"} else "count" if kind == "histogram"
+                   or (kind == "pie" and not chart.y_column)
+                   else chart.aggregation or ("count" if kind == "kpi" else "sum"))
+    value_column = (None if kind == "table" else chart.x_column if kind == "histogram"
+                    else chart.y_column or (chart.x_column if kind == "kpi" else None))
+    return result | {
+        "aggregation": aggregation,
+        "value_column": value_column,
+        "group_column": chart.x_column if kind not in {"kpi", "histogram", "table"} else None,
+        "source_row_count": source_row_count,
+        "valid_value_count": valid_value_count,
+        "omitted_count": source_row_count - valid_value_count,
+    }
+
+
+def validate_pie_aggregation(aggregation):
+    if aggregation not in {None, "sum", "count"}:
+        raise ValueError("Pie charts support sum or count only. Use a bar, line or KPI for mean, min or max; these metrics are not additive.")
+
+
 def bounded_result(labels, values, *, total_count=None, rows=None, omitted_count=0, grouped_count=0):
     rows = rows or []
     returned = len(rows) if rows else len(labels)
@@ -130,6 +153,8 @@ def validate_chart(chart, kinds: dict[str, str]) -> None:
         raise ValueError("Unsupported chart type.")
     if chart.aggregation not in {None, "sum", "mean", "count", "min", "max"}:
         raise ValueError("Unsupported chart aggregation.")
+    if chart.chart_type == "pie":
+        validate_pie_aggregation(chart.aggregation)
     normalize_filters(chart.filters_json or {}, kinds)
     if chart.chart_type == "table":
         return
@@ -153,7 +178,7 @@ def validate_chart(chart, kinds: dict[str, str]) -> None:
     if chart.chart_type == "kpi" and value not in kinds:
         raise ValueError("Invalid value column.")
     aggregation = chart.aggregation or ("count" if chart.chart_type == "kpi" else "sum")
-    if value and aggregation in {"sum", "mean"} and kinds[value] not in {"number", "boolean", "null"}:
+    if value and aggregation in {"sum", "mean", "min", "max"} and kinds[value] not in {"number", "boolean", "null"}:
         raise ValueError(f"The {aggregation} aggregation requires a numeric value column.")
 
 
@@ -265,7 +290,7 @@ def query_parquet(path: Path, chart) -> dict | None:
         if chart.chart_type == "table":
             total = connection.execute(f"SELECT COUNT(*) FROM {source}", parameters).fetchone()[0]
             rows = connection.execute(f"SELECT * FROM {source} LIMIT 100", parameters).fetchall()
-            return bounded_result([], [], total_count=total, rows=[json_value(dict(zip(schema.names, row, strict=True))) for row in rows])
+            return metric_result(bounded_result([], [], total_count=total, rows=[json_value(dict(zip(schema.names, row, strict=True))) for row in rows]), chart, total, total)
         x = quote_identifier(chart.x_column) if chart.x_column else None
         if x and kinds[chart.x_column] == "number":
             x = f"CASE WHEN isnan({x}) THEN NULL ELSE {x} END"
@@ -278,12 +303,12 @@ def query_parquet(path: Path, chart) -> dict | None:
             pairs = connection.execute(
                 f"SELECT {x}, {y} FROM {source}" + (" AND " if where else " WHERE ") + valid + " LIMIT 100", parameters,
             ).fetchall()
-            return bounded_result([json_value(a) for a, _ in pairs], [json_value(b) for _, b in pairs],
-                                  total_count=valid_count, omitted_count=total - valid_count)
+            return metric_result(bounded_result([json_value(a) for a, _ in pairs], [json_value(b) for _, b in pairs],
+                                  total_count=valid_count, omitted_count=total - valid_count), chart, total, valid_count)
         if chart.chart_type == "histogram":
-            minimum, maximum = connection.execute(f"SELECT MIN({x}), MAX({x}) FROM {source}", parameters).fetchone()
+            minimum, maximum, source_total, valid_count = connection.execute(f"SELECT MIN({x}), MAX({x}), COUNT(*), COUNT({x}) FROM {source}", parameters).fetchone()
             if minimum is None:
-                return {"labels": [], "values": [], "rows": []}
+                return metric_result({"labels": [], "values": [], "rows": []}, chart, source_total, valid_count)
             if not math.isfinite(float(minimum)) or not math.isfinite(float(maximum)):
                 raise ValueError("Histograms require finite numeric values.")
             cuts, bins = pd.cut(pd.Series([float(minimum), float(maximum)]), bins=10, retbins=True)
@@ -292,7 +317,7 @@ def query_parquet(path: Path, chart) -> dict | None:
                 # Edges come only from finite numeric data, never from SQL text.
                 expressions.append(f"COUNT(*) FILTER (WHERE {x} > {float(left)!r} AND {x} <= {float(right)!r})")
             counts = connection.execute(f"SELECT {', '.join(expressions)} FROM {source}", parameters).fetchone()
-            return {"labels": [str(label) for label in cuts.cat.categories], "values": list(counts), "rows": []}
+            return metric_result({"labels": [str(label) for label in cuts.cat.categories], "values": list(counts), "rows": []}, chart, source_total, valid_count)
         column = chart.y_column or chart.x_column
         value = quote_identifier(column)
         if kinds[column] == "boolean":
@@ -301,19 +326,22 @@ def query_parquet(path: Path, chart) -> dict | None:
         if kinds[column] == "number":
             value = f"CASE WHEN isnan({value}) THEN NULL ELSE {value} END"
         aggregation = chart.aggregation or ("count" if chart.chart_type == "kpi" else "sum")
+        if kinds[column] == "number" and aggregation != "count" and chart.chart_type != "pie":
+            value = f"CASE WHEN isfinite({value}) THEN {value} ELSE NULL END"
         function = {"mean": "AVG", "sum": "SUM", "count": "COUNT", "min": "MIN", "max": "MAX"}[aggregation]
         expression = f"{function}({value})"
         if aggregation == "sum":
             expression = f"COALESCE({expression}, 0)"
         if chart.chart_type == "kpi":
-            result = connection.execute(f"SELECT {expression} FROM {source}", parameters).fetchone()[0]
-            return {"labels": [chart.title], "values": [json_value(result)], "rows": []}
+            result, source_total, valid_count = connection.execute(f"SELECT {expression}, COUNT(*), COUNT({value}) FROM {source}", parameters).fetchone()
+            return metric_result({"labels": [chart.title], "values": [json_value(result)], "rows": []}, chart, source_total, valid_count)
         if chart.chart_type == "pie" and aggregation != "count":
             invalid_count = connection.execute(
                 f"SELECT COUNT(*) FILTER (WHERE {value} IS NOT NULL AND NOT isfinite(TRY_CAST({value} AS DOUBLE))) FROM {source}", parameters,
             ).fetchone()[0]
             if invalid_count:
                 raise ValueError("Pie charts require finite, non-negative category values.")
+        source_total, valid_count = connection.execute(f"SELECT COUNT(*), COUNT({value}) FROM {source}", parameters).fetchone()
         grouped_query = (f"SELECT {x} AS label, {expression} AS value FROM {source} GROUP BY {x} "
                          f"HAVING {expression} IS NOT NULL")
         grouped_count = 0
@@ -341,4 +369,4 @@ def query_parquet(path: Path, chart) -> dict | None:
             labels.append(label)
             values.append(json_value(remaining))
             grouped_count = total - 19
-        return bounded_result(labels, values, total_count=total, grouped_count=grouped_count)
+        return metric_result(bounded_result(labels, values, total_count=total, grouped_count=grouped_count), chart, source_total, valid_count)

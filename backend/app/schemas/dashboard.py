@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.validation import bounded_json
 from app.services.chart_filters import validate_filter_structure
@@ -21,7 +21,7 @@ class DashboardResponse(DashboardCreate):
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
-class ChartCreate(BaseModel):
+class ChartDefinition(BaseModel):
     dataset_id: int = Field(ge=1)
     title: str = Field(min_length=2, max_length=160)
     chart_type: Literal["bar", "line", "pie", "histogram", "scatter", "table", "kpi"]
@@ -35,7 +35,15 @@ class ChartCreate(BaseModel):
     def validate_filters_size(cls, value: dict[str, Any]) -> dict[str, Any]:
         return validate_filter_structure(bounded_json(value, max_bytes=20_000, label="Chart filters"))
 
-class ChartResponse(ChartCreate):
+class ChartCreate(ChartDefinition):
+    @model_validator(mode="after")
+    def validate_additive_pie(self) -> "ChartCreate":
+        if self.chart_type == "pie" and self.aggregation not in {None, "sum", "count"}:
+            raise ValueError("Pie charts support sum or count only. Use a bar, line or KPI for mean, min or max; these metrics are not additive.")
+        return self
+
+
+class ChartResponse(ChartDefinition):
     id: int
     dashboard_id: int
     created_at: datetime
@@ -50,3 +58,8 @@ class ChartDataResponse(BaseModel):
     truncated: bool = False
     omitted_count: int = 0
     grouped_count: int = 0
+    aggregation: Literal["sum", "mean", "count", "min", "max"] | None = None
+    value_column: str | None = None
+    group_column: str | None = None
+    source_row_count: int | None = None
+    valid_value_count: int | None = None

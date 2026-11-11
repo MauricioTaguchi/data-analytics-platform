@@ -26,7 +26,7 @@ No installation needed. The hosted demo uses synthetic sample data; changes rese
 
 **DataFlow is a data analytics platform built around traceable, reversible work.** Analysts can explore data quality, preview changes, build dashboards, and generate reports. The backend makes dataset revisions, background jobs, audit events, and recovery explicit, so the same workflow can be inspected and tested beyond the interface.
 
-> **Project status:** a portfolio/reference implementation with implemented failure handling and tested boundaries. Production readiness still requires managed storage, tested backup restoration, high availability, centralized telemetry, formal service objectives, and an independent security review. See [Known limitations](docs/LIMITATIONS.md).
+> **Project status:** a portfolio/reference implementation with tested data-integrity, account, and recovery controls. The public demo is isolated; a full hosted deployment still needs an approved infrastructure budget, operational configuration, deployment-specific recovery/capacity evidence, and external review. Single-node operation is deliberate; high availability or distributed processing should follow actual service requirements. See [Known limitations](docs/LIMITATIONS.md).
 
 ## Quick start
 
@@ -193,7 +193,7 @@ All dataset and job operations below enforce ownership. Interactive request and 
 | Enqueue a PDF report | `POST /api/v1/reports/project/{project_id}/dataset/{dataset_id}` |
 | Remove a terminal report and release storage | `DELETE /api/v1/reports/{report_id}` |
 
-Undo accepts a body such as `{"expected_version": 3}`. Supplying `Idempotency-Key` makes a retry return the original receipt; restoring older content still advances the dataset revision. Authentication supports registration, login, automatic refresh-token rotation, and logout/revocation. See [API examples](docs/API_EXAMPLES.md) and [Audit events and receipts](docs/AUDIT_RECEIPTS.md).
+Undo accepts a body such as `{"expected_version": 3}`. Supplying `Idempotency-Key` makes a retry return the original receipt; restoring older content still advances the dataset revision. Authentication supports registration, login, account details, automatic refresh-token rotation, logout and single-use password recovery. Recovery requires a configured SMTP sender and trusted frontend URL; resetting a password invalidates all account sessions. See [API examples](docs/API_EXAMPLES.md), [Security model](docs/SECURITY.md), and [Audit events and receipts](docs/AUDIT_RECEIPTS.md).
 
 Operational endpoints `/api/v1/operations/processing` and `/api/v1/operations/metrics` use a separate configured metrics bearer token and remain disabled when it is absent. They expose processing observations, not user-facing dataset access.
 
@@ -217,6 +217,8 @@ The full scope of these boundaries is recorded in [Known limitations](docs/LIMIT
 | Deploy and operate | [Deployment](docs/DEPLOYMENT.md) · [Operations and observability](docs/OPERATIONS.md) |
 | Recover or upgrade | [Upgrade procedure](docs/PROCESSING_RECOVERY.md) · [Backup and restore](docs/DISASTER_RECOVERY.md) · [Release process](docs/RELEASES.md) |
 | Evaluate data and capacity | [Quality contracts](docs/DATA_QUALITY.md) · [Snapshot integrity](docs/SNAPSHOT_INTEGRITY.md) · [Benchmarks](docs/BENCHMARKS.md) |
+| Review a concrete result | [Sales replay and five-minute review](docs/SALES_REPLAY_CASE.md) · [Chart metric definitions](docs/CHART_METRICS.md) |
+| Understand preview performance | [Bounded preview cache and measured trade-offs](docs/PREVIEW_CACHE.md) |
 | Evaluate boundaries | [Known limitations](docs/LIMITATIONS.md) · [Security model](docs/SECURITY.md) |
 | Extend the platform | [Contributing](CONTRIBUTING.md) · [Transformation and engine contracts](CONTRIBUTING.md#adding-transformations-and-engines) |
 

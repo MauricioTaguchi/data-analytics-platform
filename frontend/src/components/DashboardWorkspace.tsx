@@ -4,7 +4,7 @@ import type { DataRow } from "../data-utils";
 
 type Props = { live: boolean; projectId: number | null; datasetId: number | null; rows: DataRow[]; columns: string[]; externalBusy: boolean; onNotice: (message: string) => void; onBusyChange: (busy: boolean) => void };
 
-type ChartAccumulator = { count: number; sum: number; min: number; max: number };
+type ChartAccumulator = { count: number; numericCount: number; sum: number; min: number; max: number };
 export type InteractiveRequest = Readonly<{ controller: AbortController; epoch: number }>;
 
 export class InteractiveRequestFence {
@@ -55,15 +55,39 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function localMetric(data: ChartData, rows: DataRow[], xColumn: string, yColumn: string, aggregation: Aggregation, type: ChartType, validCount: number): ChartData {
+  return { ...data, aggregation: type === "scatter" || type === "table" ? null : type === "histogram" ? "count" : aggregation,
+    value_column: type === "table" ? null : yColumn,
+    group_column: type === "kpi" || type === "histogram" || type === "table" ? null : xColumn,
+    source_row_count: rows.length, valid_value_count: validCount, omitted_count: rows.length - validCount };
+}
+
+function withChartDefinition(data: ChartData, chart: Chart): ChartData {
+  const kind = chart.chart_type;
+  return { ...data,
+    aggregation: data.aggregation === undefined ? kind === "scatter" || kind === "table" ? null
+      : kind === "histogram" || (kind === "pie" && !chart.y_column) ? "count" : chart.aggregation || (kind === "kpi" ? "count" : "sum") : data.aggregation,
+    value_column: data.value_column === undefined ? kind === "table" ? null : kind === "histogram" ? chart.x_column : chart.y_column || (kind === "kpi" ? chart.x_column : null) : data.value_column,
+    group_column: data.group_column === undefined ? kind === "table" || kind === "histogram" || kind === "kpi" ? null : chart.x_column : data.group_column,
+  };
+}
+
 export function buildLocalChartData(rows: DataRow[], xColumn: string, yColumn: string, aggregation: Aggregation, type: ChartType = "bar"): ChartData {
-  if (type === "table") return { labels: [], values: [], rows: rows.slice(0, 100), total_count: rows.length, returned_count: Math.min(rows.length, 100), truncated: rows.length > 100 };
+  if (type === "pie" && aggregation !== "sum" && aggregation !== "count") {
+    throw new Error("Pie charts support sum or count only. Use a bar, line or KPI for mean, min or max; these metrics are not additive.");
+  }
+  if (type === "pie" && aggregation === "sum" && rows.some((row) => {
+    const value = row[yColumn];
+    return value !== null && value !== undefined && value !== "" && finiteNumber(typeof value === "boolean" ? Number(value) : value) === null;
+  })) throw new Error("Pie charts require finite, non-negative category values.");
+  if (type === "table") return localMetric({ labels: [], values: [], rows: rows.slice(0, 100), total_count: rows.length, returned_count: Math.min(rows.length, 100), truncated: rows.length > 100 }, rows, xColumn, yColumn, aggregation, type, rows.length);
   if (type === "scatter") {
     const pairs = rows.flatMap((row) => {
       const x = finiteNumber(row[xColumn]);
       const y = finiteNumber(row[yColumn]);
       return x === null || y === null ? [] : [{ x, y }];
     });
-    return {
+    return localMetric({
       labels: pairs.slice(0, 100).map((pair) => pair.x),
       values: pairs.slice(0, 100).map((pair) => pair.y),
       rows: [],
@@ -71,25 +95,26 @@ export function buildLocalChartData(rows: DataRow[], xColumn: string, yColumn: s
       returned_count: Math.min(pairs.length, 100),
       truncated: pairs.length > 100,
       omitted_count: rows.length - pairs.length,
-    };
+    }, rows, xColumn, yColumn, aggregation, type, pairs.length);
   }
   if (type === "kpi") {
     const values = numericValuesFor(rows, yColumn);
     const sum = values.reduce((total, value) => total + value, 0);
-    const value = aggregation === "count" ? values.length
+    const observedCount = rows.filter((row) => row[yColumn] !== null && row[yColumn] !== undefined).length;
+    const value = aggregation === "count" ? observedCount
       : aggregation === "mean" ? (values.length ? sum / values.length : null)
       : aggregation === "min" ? (values.length ? Math.min(...values) : null)
       : aggregation === "max" ? (values.length ? Math.max(...values) : null)
       : sum;
-    return { labels: [`${aggregation} of ${yColumn}`], values: [value], rows: [] };
+    return localMetric({ labels: [`${aggregation} of ${yColumn}`], values: [value], rows: [] }, rows, xColumn, yColumn, aggregation, type, aggregation === "count" ? observedCount : values.length);
   }
   if (type === "histogram") {
     const values = numericValuesFor(rows, yColumn);
-    if (!values.length) return { labels: [], values: [], rows: [] };
+    if (!values.length) return localMetric({ labels: [], values: [], rows: [] }, rows, xColumn, yColumn, aggregation, type, 0);
     const minimum = Math.min(...values);
     const maximum = Math.max(...values);
     if (minimum === maximum) {
-      return { labels: [String(minimum)], values: [values.length], rows: [] };
+      return localMetric({ labels: [String(minimum)], values: [values.length], rows: [] }, rows, xColumn, yColumn, aggregation, type, values.length);
     }
     const binCount = 10;
     const width = (maximum - minimum) / binCount;
@@ -103,25 +128,28 @@ export function buildLocalChartData(rows: DataRow[], xColumn: string, yColumn: s
       const end = index === binCount - 1 ? maximum : minimum + width * (index + 1);
       return `${formatter.format(start)}–${formatter.format(end)}`;
     });
-    return { labels, values: counts, rows: [] };
+    return localMetric({ labels, values: counts, rows: [] }, rows, xColumn, yColumn, aggregation, type, values.length);
   }
   const groups = new Map<string, ChartAccumulator>();
   for (const row of rows) {
     const key = String(row[xColumn] ?? "Unknown");
     const raw = row[yColumn];
-    const parsed = raw === null || raw === undefined || raw === "" ? Number.NaN : Number(raw);
-    const hasValue = Number.isFinite(parsed);
+    const parsed = finiteNumber(typeof raw === "boolean" ? Number(raw) : raw);
+    const hasValue = parsed !== null;
+    const observed = raw !== null && raw !== undefined;
     const current = groups.get(key);
     if (current) {
+      if (observed) current.count += 1;
       if (hasValue) {
-        current.count += 1;
+        current.numericCount += 1;
         current.sum += parsed;
         current.min = Math.min(current.min, parsed);
         current.max = Math.max(current.max, parsed);
       }
     } else {
       groups.set(key, {
-        count: hasValue ? 1 : 0,
+        count: observed ? 1 : 0,
+        numericCount: hasValue ? 1 : 0,
         sum: hasValue ? parsed : 0,
         min: hasValue ? parsed : Number.POSITIVE_INFINITY,
         max: hasValue ? parsed : Number.NEGATIVE_INFINITY,
@@ -129,17 +157,18 @@ export function buildLocalChartData(rows: DataRow[], xColumn: string, yColumn: s
     }
   }
   const labels = [...groups.entries()]
-    .filter(([, group]) => aggregation === "sum" || aggregation === "count" || group.count > 0)
+    .filter(([, group]) => aggregation === "sum" || aggregation === "count" || group.numericCount > 0)
     .map(([label]) => label);
   const values = labels.map((label) => {
     const group = groups.get(label)!;
     if (aggregation === "count") return group.count;
-    if (aggregation === "mean") return group.count ? group.sum / group.count : 0;
-    if (aggregation === "min") return group.count ? group.min : 0;
-    if (aggregation === "max") return group.count ? group.max : 0;
+    if (aggregation === "mean") return group.numericCount ? group.sum / group.numericCount : 0;
+    if (aggregation === "min") return group.numericCount ? group.min : 0;
+    if (aggregation === "max") return group.numericCount ? group.max : 0;
     return group.sum;
   });
-  return { labels, values, rows: [] };
+  const validCount = [...groups.values()].reduce((total, group) => total + (aggregation === "count" ? group.count : group.numericCount), 0);
+  return localMetric({ labels, values, rows: [] }, rows, xColumn, yColumn, aggregation, type, validCount);
 }
 
 const CHART_COLORS = ["#155eef", "#0e9384", "#7f56d9", "#f79009", "#d92d20", "#2e90fa", "#12b76a", "#ee46bc"];
@@ -154,14 +183,40 @@ function ChartLimitNotice({ data, shown, available, unit }: { data: ChartData; s
   return <ChartNotice>Showing the first {shown} of {data.total_count ?? available} {unit}. Remaining data is not plotted.</ChartNotice>;
 }
 
+export function ChartMetricSummary({ data, type }: { data: ChartData | null; type: ChartType }) {
+  if (!data) return null;
+  const measure = data.value_column || "selected measure";
+  const group = data.group_column || "selected category";
+  const aggregation = data.aggregation;
+  const countRows = type === "pie" && data.value_column === null;
+  const operation = aggregation === "mean" ? "Arithmetic mean" : aggregation === "min" ? "Minimum"
+    : aggregation === "max" ? "Maximum" : aggregation === "count" ? "Count" : "Sum";
+  const description = type === "table" ? "Rows from the current result, before any display limit."
+    : type === "scatter" ? `One point is one source row: X = ${group}; Y = ${measure}. Repeated X values remain separate observations.`
+    : type === "histogram" ? `Number of recorded ${measure} values in each interval. Unit: rows per interval.`
+    : aggregation === "count" ? countRows ? `Count of source rows per ${group}. Unit: rows; duplicates count separately.` : `Count of non-null ${measure} values${type === "kpi" ? "" : ` per ${group}`}. Unit: recorded values; duplicates count separately, and empty text counts as a value.`
+    : `${operation} of ${measure}${type === "kpi" ? " across the result" : ` calculated separately for each ${group}`}. Unit: the source unit of ${measure}.`;
+  const omitted = data.omitted_count ?? 0;
+  return <div aria-label="Metric definition">
+    <ChartNotice>{description}</ChartNotice>
+    {aggregation === "mean" ? <ChartNotice>Each usable source row has equal weight. Category averages are not added together or presented as a global average.</ChartNotice> : null}
+    {type === "pie" ? <ChartNotice>Percentages show each category’s share of the {aggregation === "count" ? "count" : "sum"}. Other combines only additive category contributions.</ChartNotice> : null}
+    {data.source_row_count != null ? <ChartNotice>Result scope: {data.source_row_count} source rows after filtering{data.valid_value_count != null && type !== "table" ? `; ${data.valid_value_count} ${type === "scatter" ? "usable X/Y pairs" : countRows ? "rows counted" : "recorded values used"}` : ""}.{omitted && type !== "scatter" ? ` ${omitted} ${aggregation === "count" ? "null" : "missing or non-finite"} measure values excluded.` : ""}</ChartNotice> : null}
+    {data.valid_value_count === 0 && (data.source_row_count ?? 0) > 0 ? <ChartNotice>No usable observations remain. A zero sum or count does not mean a measured value of zero; averages and extrema are unavailable.</ChartNotice> : null}
+  </div>;
+}
+
 export function ChartVisual({ data, type = "bar" }: { data: ChartData | null; type?: ChartType }) {
   const numericValues = (data?.labels || []).map((_, index) => finiteNumber(data?.values[index]));
+  if (type === "pie" && data?.aggregation && data.aggregation !== "sum" && data.aggregation !== "count") return <div className="empty-state"><strong>Choose an additive measure for a pie</strong><span>Use sum or count. Compare mean, min or max in a bar, line or KPI; they cannot form a meaningful part-to-whole total.</span></div>;
+  if (data?.source_row_count === 0) return <div className="empty-state"><strong>No matching rows</strong><span>This chart’s current result contains no source rows.</span></div>;
   if (type === "table" && data?.rows.length) {
     const tableColumns = Object.keys(data.rows[0] || {});
     return <><ChartLimitNotice data={data} shown={Math.min(data.rows.length, 20)} available={data.rows.length} unit="rows" /><div className="chart-table"><table><thead><tr>{tableColumns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{data.rows.slice(0, 20).map((row, index) => <tr key={index}>{tableColumns.map((column) => <td key={column}>{String(row[column] ?? "—")}</td>)}</tr>)}</tbody></table></div></>;
   }
   if (type === "scatter" && data && !data.labels.length) return <div className="empty-state"><strong>No valid numeric pairs</strong><span>Scatter charts require finite numeric X and Y values in the same row.</span></div>;
-  if (!data?.labels.length) return <div className="empty-state"><strong>No chart yet</strong><span>Choose dimensions and build a chart.</span></div>;
+  if (data && !data.labels.length) return <div className="empty-state"><strong>No usable values</strong><span>The result contains no values that this chart can display. Review the metric and missing-value counts.</span></div>;
+  if (!data) return <div className="empty-state"><strong>No chart yet</strong><span>Choose dimensions and build a chart.</span></div>;
   if (type === "kpi") {
     const value = numericValues[0];
     const displayValue = value === null ? "—" : CHART_NUMBER_FORMAT.format(value);
@@ -247,8 +302,10 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
   const requestFence = interactiveRequests.current;
   const numericColumns = useMemo(() => columns.filter((column) => rows.some((row) => typeof row[column] === "number")), [columns, rows]);
   const xColumns = chartType === "scatter" ? numericColumns : columns;
+  const measureColumns = aggregation === "count" && chartType !== "scatter" && chartType !== "histogram" ? columns : numericColumns.length ? numericColumns : columns;
   const activeXColumn = xColumns.includes(xColumn) ? xColumn : xColumns[0] || "";
-  const activeYColumn = columns.includes(yColumn) ? yColumn : numericColumns[0] || columns[0] || "";
+  const activeYColumn = measureColumns.includes(yColumn) ? yColumn : measureColumns[0] || "";
+  const invalidPieAggregation = chartType === "pie" && aggregation !== "sum" && aggregation !== "count";
 
   useEffect(() => {
     const hadInteractiveRequest = requestFence.invalidate();
@@ -288,7 +345,7 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
       if (savedCharts[0]) {
         const chartData = await fetchChartData(savedCharts[0].id, request.controller.signal);
         if (!requestFence.isCurrent(request)) return;
-        setData(chartData);
+        setData(withChartDefinition(chartData, savedCharts[0]));
         setDataType(savedCharts[0].chart_type);
         setChartType(savedCharts[0].chart_type);
         setVisualTitle(savedCharts[0].title);
@@ -309,6 +366,10 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
   }
 
   async function buildChart() {
+    if (invalidPieAggregation) {
+      onNotice("Choose sum or count for a pie chart. Use a bar, line or KPI for mean, min or max.");
+      return;
+    }
     const request = requestFence.begin();
     setBusy(true);
     onBusyChange(true);
@@ -343,7 +404,7 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
       if (!requestFence.isCurrent(request)) return;
       const chartData = await fetchChartData(chart.id, request.controller.signal);
       if (!requestFence.isCurrent(request)) return;
-      setCharts((items) => [chart, ...items]); setData(chartData); setDataType(chart.chart_type); setVisualTitle(chart.title);
+      setCharts((items) => [chart, ...items]); setData(withChartDefinition(chartData, chart)); setDataType(chart.chart_type); setVisualTitle(chart.title);
       onNotice("Dashboard chart persisted and loaded from the API.");
     } catch (error) {
       if (requestFence.isCurrent(request) && !isRequestCancelled(error)) onNotice(describeApiError(error));
@@ -363,7 +424,7 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
     try {
       const chartData = await fetchChartData(chart.id, request.controller.signal);
       if (!requestFence.isCurrent(request)) return;
-      setData(chartData); setDataType(chart.chart_type); setChartType(chart.chart_type); setVisualTitle(chart.title);
+      setData(withChartDefinition(chartData, chart)); setDataType(chart.chart_type); setChartType(chart.chart_type); setVisualTitle(chart.title);
     }
     catch (error) {
       if (requestFence.isCurrent(request) && !isRequestCancelled(error)) onNotice(describeApiError(error));
@@ -378,11 +439,12 @@ export function DashboardWorkspace({ live, projectId, datasetId, rows, columns, 
 
   return <section className="dashboard-layout"><article className="panel chart-config"><div className="panel-header"><div><h2>Dashboard builder</h2><p>Turn transformed datasets into decision-ready visualizations</p></div><span className={live ? "status-pill success" : "status-pill"}>{live ? "Persisted" : "Demo"}</span></div>
     <div className="config-body"><label><span id={`${fieldId}-dimension`}>{chartType === "scatter" ? "X value" : "Dimension"}</span><select aria-labelledby={`${fieldId}-dimension`} value={activeXColumn} onChange={(event) => setXColumn(event.target.value)}>{xColumns.map((column) => <option key={column}>{column}</option>)}</select></label>
-      <label><span id={`${fieldId}-measure`}>{chartType === "scatter" ? "Y value" : "Measure"}</span><select aria-labelledby={`${fieldId}-measure`} value={activeYColumn} onChange={(event) => setYColumn(event.target.value)}>{(numericColumns.length ? numericColumns : columns).map((column) => <option key={column}>{column}</option>)}</select></label>
-      <label><span id={`${fieldId}-aggregation`}>Aggregation</span><select aria-labelledby={`${fieldId}-aggregation`} value={aggregation} disabled={chartType === "scatter" || chartType === "table" || chartType === "histogram"} onChange={(event) => setAggregation(event.target.value as Aggregation)}>{["sum", "mean", "count", "min", "max"].map((item) => <option key={item}>{item}</option>)}</select></label>
+      <label><span id={`${fieldId}-measure`}>{chartType === "scatter" ? "Y value" : "Measure"}</span><select aria-labelledby={`${fieldId}-measure`} value={activeYColumn} onChange={(event) => setYColumn(event.target.value)}>{measureColumns.map((column) => <option key={column}>{column}</option>)}</select></label>
+      <label><span id={`${fieldId}-aggregation`}>Aggregation</span><select aria-labelledby={`${fieldId}-aggregation`} value={aggregation} disabled={chartType === "scatter" || chartType === "table" || chartType === "histogram"} onChange={(event) => setAggregation(event.target.value as Aggregation)}>{["sum", "mean", "count", "min", "max"].map((item) => <option key={item} disabled={chartType === "pie" && item !== "sum" && item !== "count"}>{item}</option>)}</select></label>
       <label><span id={`${fieldId}-chart-type`}>Chart type</span><select aria-labelledby={`${fieldId}-chart-type`} value={chartType} onChange={(event) => setChartType(event.target.value as ChartType)}><option value="bar">Bar</option><option value="line">Line</option><option value="pie">Pie</option><option value="scatter">Scatter</option><option value="histogram">Histogram</option><option value="kpi">KPI</option><option value="table">Table</option></select></label>
-      <button className="primary" disabled={busy || externalBusy || !rows.length || (chartType === "scatter" && !numericColumns.length)} onClick={buildChart}>{busy ? "Building…" : "Build chart"}</button></div>
+      {chartType === "pie" ? <p>Pie charts compare shares of a sum or count. Choose a bar, line or KPI to compare averages, minima or maxima.</p> : null}
+      <button className="primary" disabled={busy || externalBusy || !rows.length || invalidPieAggregation || (chartType === "scatter" && !numericColumns.length)} onClick={buildChart}>{busy ? "Building…" : "Build chart"}</button></div>
     {dashboards.length ? <div className="saved-items"><strong>Saved dashboards</strong>{dashboards.map((dashboard) => <button key={dashboard.id} disabled={busy || externalBusy} aria-pressed={dashboard.id === selectedDashboardId} onClick={() => selectDashboard(dashboard)}>{dashboard.name}</button>)}</div> : null}
-  </article><article className="panel chart-canvas"><div className="panel-header"><div><h2>{visualTitle || `${aggregation} of ${activeYColumn} by ${activeXColumn}`}</h2><p>{data?.labels.length || data?.rows.length || 0} chart records loaded{live ? "" : " from the local preview"}</p></div></div><ChartVisual data={data} type={dataType} />
+  </article><article className="panel chart-canvas"><div className="panel-header"><div><h2>{visualTitle || `${aggregation} of ${activeYColumn} by ${activeXColumn}`}</h2><p>{data?.labels.length || data?.rows.length || 0} chart records loaded{live ? "" : " from the local preview"}</p></div></div><ChartMetricSummary data={data} type={dataType} /><ChartVisual data={data} type={dataType} />
     {charts.length ? <div className="chart-tabs">{charts.map((chart) => <button key={chart.id} disabled={busy || externalBusy} onClick={() => openChart(chart)}>{chart.title}</button>)}</div> : null}</article></section>;
 }

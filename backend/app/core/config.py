@@ -1,6 +1,7 @@
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEVELOPMENT_SECRET = "development-only-change-me"
@@ -21,6 +22,16 @@ class Settings(BaseSettings):
     SECRET_KEY: str = DEVELOPMENT_SECRET
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    PASSWORD_RESET_URL: str = ""
+    PASSWORD_RESET_EXPIRE_MINUTES: int = Field(default=30, ge=5, le=60)
+    PASSWORD_RESET_REQUEST_COOLDOWN_SECONDS: int = Field(default=60, ge=30, le=3_600)
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = Field(default=587, ge=1, le=65535)
+    SMTP_USERNAME: str = Field(default="", repr=False)
+    SMTP_PASSWORD: SecretStr = SecretStr("")
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_TLS_MODE: Literal["starttls", "ssl", "plain"] = "starttls"
+    SMTP_TIMEOUT_SECONDS: int = Field(default=10, ge=1, le=30)
     DATABASE_URL: str = "postgresql+psycopg2://analytics:analytics@db:5432/analytics"
     DATABASE_POOL_SIZE: int = Field(default=10, ge=1)
     DATABASE_MAX_OVERFLOW: int = Field(default=10, ge=0)
@@ -90,6 +101,21 @@ class Settings(BaseSettings):
     DASHBOARD_CACHE_MAX_BYTES: int = Field(default=8_388_608, ge=1)
     OPERATIONS_METRICS_TOKEN: str = ""
     OPERATIONS_HEARTBEAT_TTL_SECONDS: int = Field(default=30, ge=10, le=300)
+
+    @model_validator(mode="after")
+    def validate_password_reset_delivery(self) -> "Settings":
+        production = self.ENVIRONMENT.lower() not in {"development", "test"}
+        if self.PASSWORD_RESET_URL:
+            url = urlsplit(self.PASSWORD_RESET_URL)
+            if (url.scheme not in ({"https"} if production else {"http", "https"})
+                    or not url.hostname or url.username or url.password or url.query or url.fragment
+                    or any(character.isspace() for character in self.PASSWORD_RESET_URL)):
+                raise ValueError("PASSWORD_RESET_URL must be a trusted absolute HTTPS URL without credentials, query, or fragment.")
+        if production and self.SMTP_TLS_MODE == "plain":
+            raise ValueError("SMTP must use STARTTLS or SSL outside development and test.")
+        if any(character in self.SMTP_HOST + self.SMTP_FROM_EMAIL for character in "\r\n"):
+            raise ValueError("SMTP configuration cannot contain header separators.")
+        return self
 
     @model_validator(mode="after")
     def validate_production_secret(self) -> "Settings":

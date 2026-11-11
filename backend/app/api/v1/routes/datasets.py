@@ -32,6 +32,8 @@ from app.schemas.dataset import (
     UndoResponse,
 )
 from app.services.dataset_audit_service import DatasetAuditService
+from app.services.preview_cache_service import PreviewCacheService
+from app.services.snapshot_service import SnapshotService
 from app.services.dataset_service import (
     DatasetExpansionLimitError,
     DatasetService,
@@ -270,7 +272,10 @@ def list_datasets(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    DatasetService.ensure_project(db, project_id, user.id)
+    try:
+        DatasetService.ensure_project(db, project_id, user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Project not found.") from exc
     return (
         db.query(Dataset)
         .filter(Dataset.project_id == project_id, Dataset.deleted_at.is_(None))
@@ -298,7 +303,11 @@ def preview_dataset(
 ):
     try:
         dataset = owned_dataset(db, dataset_id, user.id)
-        source = SimpleNamespace(stored_path=dataset.stored_path, status=dataset.status)
+        manifest = SnapshotService.manifest(db, dataset.id, dataset.stored_path)
+        source = SimpleNamespace(
+            stored_path=dataset.stored_path, status=dataset.status,
+            preview_cache=PreviewCacheService.metadata(manifest),
+        )
         # No database transaction/connection is held while a parser runs.
         db.rollback()
         return DatasetService.preview(source, page, page_size)

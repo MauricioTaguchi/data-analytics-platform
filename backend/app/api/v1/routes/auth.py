@@ -2,24 +2,33 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from jwt import InvalidTokenError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.security import ALGORITHM, create_access_token, create_refresh_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models.session import RefreshSession
 from app.models.user import User
-from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, TokenResponse
+from app.schemas.auth import (
+    AccountResponse, LoginRequest, LogoutRequest, PasswordResetConfirm, PasswordResetRequest,
+    PasswordResetResponse, RefreshRequest, RegisterRequest, TokenResponse,
+)
+from app.services.password_reset_service import (
+    INVALID_RESET_MESSAGE, RESET_REQUEST_MESSAGE, confirm_password_reset, notify_password_changed, request_password_reset,
+)
 
 router = APIRouter()
 
 
 def issue_token_pair(db: Session, user: User, *, family_id: str | None = None) -> TokenResponse:
+    user_id, auth_version = user.id, user.auth_version
     jti = uuid4().hex
     session = RefreshSession(
-        user_id=user.id,
+        user_id=user_id,
         jti=jti,
         family_id=family_id or uuid4().hex,
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
@@ -27,8 +36,8 @@ def issue_token_pair(db: Session, user: User, *, family_id: str | None = None) -
     db.add(session)
     db.commit()
     return TokenResponse(
-        access_token=create_access_token(str(user.id)),
-        refresh_token=create_refresh_token(str(user.id), jti),
+        access_token=create_access_token(str(user_id), auth_version=auth_version),
+        refresh_token=create_refresh_token(str(user_id), jti),
     )
 
 
@@ -38,17 +47,47 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Email is already registered.")
     user = User(name=payload.name, email=payload.email, password_hash=hash_password(payload.password))
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        # Keep the account invisible to recovery until its initial session is
+        # committed too; otherwise a reset can race initial token issuance.
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Email is already registered.") from exc
     return issue_token_pair(db, user)
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not verify_password(payload.password, user.password_hash):
+    if user:
+        db.query(User).filter(User.id == user.id).update({User.id: User.id}, synchronize_session=False)
+        db.refresh(user)
+    if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
+        db.rollback()
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     return issue_token_pair(db, user)
+
+
+@router.get("/me", response_model=AccountResponse)
+def account(user: User = Depends(get_current_user)):
+    return user
+
+
+@router.post("/password-reset/request", response_model=PasswordResetResponse, status_code=202)
+def request_reset(payload: PasswordResetRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(request_password_reset, str(payload.email))
+    return {"message": RESET_REQUEST_MESSAGE}
+
+
+@router.post("/password-reset/confirm", status_code=204)
+def confirm_reset(payload: PasswordResetConfirm, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    try:
+        recipient = confirm_password_reset(db, payload.token, payload.new_password)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=INVALID_RESET_MESSAGE) from exc
+    background_tasks.add_task(notify_password_changed, recipient)
 
 
 def decode_refresh(raw_token: str) -> dict:

@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from app.operations.backup import (
-    RecoveryError, _connection_parameters, create_backup, restore_backup, sha256_file, verify_archive,
+    RecoveryError, _connection_parameters, create_backup, sha256_file, verify_archive,
 )
 
 
@@ -93,7 +93,18 @@ def test_dump_restore_retains_snapshot_bytes_history_and_identity(tmp_path, sour
     backup = create_backup(source_url, uploads, reports, archive, maintenance=True)
     manifest = verify_archive(archive)
     assert set(manifest["required_files"]) == {"uploads/input.csv", "uploads/cleaned.csv"}
-    restored = restore_backup(archive, admin_url, tmp_path / "restored", trusted=True)
+    drill_report = tmp_path / "operator-drill.json"
+    drill = subprocess.run([
+        sys.executable, str(Path(__file__).resolve().parents[2] / "ops/restore_drill.py"),
+        "--archive", str(archive), "--directory", str(tmp_path / "restored"),
+        "--output", str(drill_report), "--trusted-backup",
+    ], env={**os.environ, "RECOVERY_ADMIN_DATABASE_URL": admin_url}, capture_output=True, text=True, timeout=90)
+    drill_evidence = json.loads(drill_report.read_text())
+    assert drill.returncode == 0, drill_evidence
+    assert drill_evidence["status"] == "verified"
+    assert drill_evidence["total_elapsed_seconds"] > 0
+    assert drill_evidence["deployment_ready"] is False
+    restored = drill_evidence["restore"]
     owned.append(restored["database"])
     assert restored["row_counts"]["datasets"] == 1
     assert restored["row_counts"]["transformations"] == 1
@@ -109,7 +120,8 @@ def test_dump_restore_retains_snapshot_bytes_history_and_identity(tmp_path, sour
         cursor.execute("SELECT sha256 FROM dataset_snapshots ORDER BY version")
         assert [row[0] for row in cursor.fetchall()] == [sha256_file(original)[0], sha256_file(transformed)[0]]
     evidence = {"fixture": "two CSV snapshots, one transformed dataset, one audit event", "backup": backup,
-                "restore": restored, "production_rpo_rto": "not established by this small fixture"}
+                "restore": restored, "operator_workflow": drill_evidence,
+                "production_rpo_rto": "not established by this small fixture"}
     evidence_path = os.environ.get("RECOVERY_DRILL_REPORT")
     if evidence_path:
         destination = Path(evidence_path)

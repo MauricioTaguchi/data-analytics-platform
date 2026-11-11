@@ -1,0 +1,198 @@
+name: Checked HTTP workload
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/workload.yml'
+      - 'docs/BENCHMARKS.md'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/workload.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workload-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disposable-http-journeys:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: workload
+          POSTGRES_USER: workload
+          POSTGRES_PASSWORD: disposable-workload-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U workload -d workload'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd 'redis-cli ping'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      ENVIRONMENT: test
+      SECRET_KEY: disposable-workload-only-credential-0000000000000000000000000000
+      DATABASE_URL: postgresql+psycopg2://workload:disposable-workload-only@localhost:5432/workload
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_EAGER: 'false'
+      CELERY_WORKER_CONCURRENCY: '2'
+      AUTH_RATE_LIMIT_MAX_ATTEMPTS: '1000'
+      UPLOAD_RATE_LIMIT_MAX_ATTEMPTS: '1000'
+      MIN_FREE_DISK_SPACE_MB: '1'
+      TRANSFORMATION_ENGINE_THREADS: '1'
+      TRANSFORMATION_ENGINE_MEMORY_MB: '512'
+      UPLOAD_DIR: ${{ runner.temp }}/dataflow-workload/uploads
+      REPORT_DIR: ${{ runner.temp }}/dataflow-workload/reports
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install pinned dependencies and migrate disposable database
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m alembic upgrade head
+          mkdir -p "$RUNNER_TEMP/dataflow-workload"
+      - name: Start API, real worker and recovery scheduler
+        run: |
+          setsid python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/dataflow-workload/api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/dataflow-workload/api.pid"
+          setsid celery -A app.worker.celery_app worker --loglevel=warning --queues interactive,bulk --concurrency 2 > "$RUNNER_TEMP/dataflow-workload/worker.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/dataflow-workload/worker.pid"
+          setsid python -m app.scheduler > "$RUNNER_TEMP/dataflow-workload/scheduler.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/dataflow-workload/scheduler.pid"
+          python - <<'PY'
+          import time
+          import httpx
+          for attempt in range(60):
+              try:
+                  if httpx.get('http://127.0.0.1:8000/health/ready', timeout=2).status_code == 200:
+                      break
+              except httpx.HTTPError:
+                  pass
+              time.sleep(0.5)
+          else:
+              raise SystemExit('API readiness did not succeed within the startup budget.')
+          PY
+      - name: Sample selected process trees and database/cache containers
+        env:
+          WORKLOAD_POSTGRES_ID: ${{ job.services.postgres.id }}
+          WORKLOAD_REDIS_ID: ${{ job.services.redis.id }}
+        run: |
+          workload_api_pid=$(cat "$RUNNER_TEMP/dataflow-workload/api.pid")
+          workload_worker_pid=$(cat "$RUNNER_TEMP/dataflow-workload/worker.pid")
+          workload_scheduler_pid=$(cat "$RUNNER_TEMP/dataflow-workload/scheduler.pid")
+          setsid python scripts/sample_workload_resources.py \
+            --root "api=$workload_api_pid" --root "worker=$workload_worker_pid" --root "scheduler=$workload_scheduler_pid" \
+            --container "postgres=$WORKLOAD_POSTGRES_ID" --container "redis=$WORKLOAD_REDIS_ID" \
+            --max-seconds 900 --stop-file "$RUNNER_TEMP/dataflow-workload/resources.stop" \
+            --output "$RUNNER_TEMP/dataflow-workload/resources.json" > "$RUNNER_TEMP/dataflow-workload/resources.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/dataflow-workload/resources.pid"
+      - name: Run bounded journeys with exact content checks
+        run: |
+          python -m app.operations.workload \
+            --base-url http://127.0.0.1:8000 --rows 10000 --concurrency 2 --iterations 1 \
+            --formats csv json xlsx parquet --duration-limit 600 --job-timeout 120 \
+            --revision "$GITHUB_SHA" --server-on-driver-host \
+            --output "$RUNNER_TEMP/dataflow-workload/evidence.json"
+      - name: Finish resource sampling and print observed totals
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/dataflow-workload"
+          touch "$RUNNER_TEMP/dataflow-workload/resources.stop"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import time
+          path = Path(os.environ['RUNNER_TEMP']) / 'dataflow-workload' / 'resources.json'
+          for attempt in range(30):
+              if path.exists():
+                  break
+              time.sleep(0.5)
+          else:
+              raise SystemExit('Resource sampler did not publish evidence within its stop budget.')
+          report = json.loads(path.read_text())
+          print('WORKLOAD_RESOURCES ' + json.dumps({key: value for key, value in report.items()
+                                                    if key not in {'samples', 'limitations'}}, sort_keys=True))
+          assert all(group['observed_process_identities'] > 0 for group in report['groups'].values())
+          assert len(report['containers']) == 2 and all(item['samples'] > 0 for item in report['containers'].values())
+          PY
+      - name: Print measured summary and deployment settings
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from app.core.config import settings
+          from app.operations.workload import print_summary
+          root = Path(os.environ['RUNNER_TEMP']) / 'dataflow-workload'
+          fields = ('CELERY_EAGER', 'CELERY_WORKER_CONCURRENCY', 'TRANSFORMATION_ENGINE',
+                    'TRANSFORMATION_ENGINE_THREADS', 'TRANSFORMATION_ENGINE_MEMORY_MB',
+                    'DATASET_PREVIEW_MAX_CONCURRENT', 'DATASET_PREVIEW_MEMORY_MB',
+                    'MAX_FILE_SIZE_MB', 'MAX_ACTIVE_JOBS_PER_USER')
+          deployment = {'api_workers': 1, 'worker_queues': ['interactive', 'bulk'],
+                        'database_image': 'postgres:16-alpine', 'broker_image': 'redis:7-alpine',
+                        'settings': {name: getattr(settings, name) for name in fields},
+                        'ci_run': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'deployment.json').write_text(json.dumps(deployment, indent=2) + '\n')
+          print('DEPLOYMENT ' + json.dumps(deployment, sort_keys=True))
+          evidence = root / 'evidence.json'
+          if evidence.exists():
+              print_summary(json.loads(evidence.read_text()))
+          else:
+              print('No completed workload report; see startup diagnostics.')
+          PY
+      - name: Stop created processes and reclaim synthetic dataset files
+        if: always()
+        run: |
+          for workload_role in api worker scheduler resources; do
+            workload_file="$RUNNER_TEMP/dataflow-workload/$workload_role.pid"
+            if [ -f "$workload_file" ]; then
+              workload_pid=$(cat "$workload_file")
+              kill -TERM -- "-$workload_pid" 2>/dev/null || true
+            fi
+          done
+          rm -rf "$RUNNER_TEMP/dataflow-workload/uploads" "$RUNNER_TEMP/dataflow-workload/reports"
+      - name: Print bounded diagnostics on failure
+        if: failure()
+        run: |
+          for workload_role in api worker scheduler resources; do
+            workload_file="$RUNNER_TEMP/dataflow-workload/$workload_role.log"
+            if [ -f "$workload_file" ]; then
+              tail -n 60 "$workload_file"
+            fi
+          done
+      - name: Preserve measured evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: checked-http-workload
+          path: |
+            ${{ runner.temp }}/dataflow-workload/evidence.json
+            ${{ runner.temp }}/dataflow-workload/deployment.json
+            ${{ runner.temp }}/dataflow-workload/resources.json
+          if-no-files-found: warn
+          retention-days: 30

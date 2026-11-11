@@ -40,10 +40,7 @@ logger = logging.getLogger("dataflow.requests")
 
 
 def _client_address(request: Request) -> str:
-    if settings.TRUST_PROXY_HEADERS:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",", 1)[0].strip()
+    # Only the ASGI server may resolve forwarding headers from allowlisted peers.
     return request.client.host if request.client else "unknown"
 
 
@@ -52,7 +49,9 @@ async def security_and_rate_limit(request: Request, call_next):
     request_id = normalize_correlation(request.headers.get("X-Request-ID"))
     started_at = perf_counter()
 
-    if request.url.path.endswith(("/auth/login", "/auth/register")):
+    if request.url.path.endswith((
+        "/auth/login", "/auth/register", "/auth/password-reset/request", "/auth/password-reset/confirm",
+    )):
         try:
             attempts = CacheService.increment(
                 f"rate-limit:auth:{_client_address(request)}",

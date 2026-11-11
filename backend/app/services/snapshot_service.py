@@ -1,15 +1,13 @@
 """Content verification and opt-in retention of immutable dataset snapshots."""
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import os
 from pathlib import Path
-import stat
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.file_integrity import VerifiedFile, digest_file
 from app.db.session import SessionLocal
 from app.models.dataset import Dataset
 from app.models.dataset_snapshot import DatasetSnapshot
@@ -19,43 +17,12 @@ from app.models.transformation import Transformation
 from app.services.job_service import CAPACITY_JOB_STATUSES, JobService
 
 
-@dataclass(frozen=True)
-class VerifiedFile:
-    size_bytes: int
-    sha256: str
-    device: int
-    inode: int
-    modified_ns: int
-
-    def assert_unchanged(self, path: str | Path) -> None:
-        current = Path(path).stat(follow_symlinks=False)
-        if (not stat.S_ISREG(current.st_mode) or
-                (current.st_size, current.st_dev, current.st_ino, current.st_mtime_ns) !=
-                (self.size_bytes, self.device, self.inode, self.modified_ns)):
-            raise ValueError("The snapshot changed during verification; the active dataset was not changed.")
 
 
 class SnapshotService:
     @staticmethod
     def digest(path: str | Path) -> VerifiedFile:
-        """Stream bytes outside account/dataset locks and detect concurrent replacement."""
-        path = Path(path)
-        try:
-            before = path.stat(follow_symlinks=False)
-            if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
-                raise OSError("Snapshot is not a nonempty regular file.")
-            digest = sha256()
-            with path.open("rb") as source:
-                opened = os.fstat(source.fileno())
-                if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-                    raise OSError("Snapshot changed while opening.")
-                for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            result = VerifiedFile(before.st_size, digest.hexdigest(), before.st_dev, before.st_ino, before.st_mtime_ns)
-            result.assert_unchanged(path)
-            return result
-        except OSError as exc:
-            raise ValueError("The previous snapshot is unavailable; the active dataset was not changed.") from exc
+        return digest_file(path)
 
     @staticmethod
     def record(db: Session, *, dataset_id: int, path: str | Path, version: int, size_bytes: int, sha256: str) -> DatasetSnapshot:
@@ -155,6 +122,10 @@ class SnapshotService:
                         continue
                     snapshot.availability = "EXPIRED"
                     snapshot.expired_at = datetime.now(timezone.utc)
+                    # Derived presentation data has no audit value after its
+                    # source expires; retain only the original manifest.
+                    snapshot.preview_cache_json = None
+                    snapshot.preview_cache_sha256 = None
                     ArtifactService.schedule_delete(db, snapshot.stored_path, owner_id=owner_id)
                     db.commit()
                     expired += 1
