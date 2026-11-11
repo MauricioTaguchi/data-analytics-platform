@@ -34,13 +34,13 @@ jobs:
           POSTGRES_PASSWORD: disposable-workload-only
         ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U workload -d workload'
+          --health-cmd "pg_isready -U workload -d workload"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ['6379:6379']
         options: >-
-          --health-cmd 'redis-cli ping'
+          --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
     defaults:
       run:
@@ -69,6 +69,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - name: Install pinned dependencies and migrate disposable database
+        id: dependencies
         run: |
           python -m pip install -r requirements-dev.txt
           python -m alembic upgrade head
@@ -95,6 +96,7 @@ jobs:
               raise SystemExit('API readiness did not succeed within the startup budget.')
           PY
       - name: Sample selected process trees and database/cache containers
+        id: sampling
         env:
           WORKLOAD_POSTGRES_ID: ${{ job.services.postgres.id }}
           WORKLOAD_REDIS_ID: ${{ job.services.redis.id }}
@@ -116,7 +118,7 @@ jobs:
             --revision "$GITHUB_SHA" --server-on-driver-host \
             --output "$RUNNER_TEMP/dataflow-workload/evidence.json"
       - name: Finish resource sampling and print observed totals
-        if: always()
+        if: always() && steps.sampling.outcome == 'success'
         run: |
           mkdir -p "$RUNNER_TEMP/dataflow-workload"
           touch "$RUNNER_TEMP/dataflow-workload/resources.stop"
@@ -139,7 +141,7 @@ jobs:
           assert len(report['containers']) == 2 and all(item['samples'] > 0 for item in report['containers'].values())
           PY
       - name: Print measured summary and deployment settings
-        if: always()
+        if: always() && steps.dependencies.outcome == 'success'
         run: |
           python - <<'PY'
           import json
@@ -167,6 +169,7 @@ jobs:
           PY
       - name: Stop created processes and reclaim synthetic dataset files
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
           for workload_role in api worker scheduler resources; do
             workload_file="$RUNNER_TEMP/dataflow-workload/$workload_role.pid"
@@ -178,6 +181,7 @@ jobs:
           rm -rf /tmp/dataflow-workload/uploads /tmp/dataflow-workload/reports
       - name: Print bounded diagnostics on failure
         if: failure()
+        working-directory: ${{ github.workspace }}
         run: |
           for workload_role in api worker scheduler resources; do
             workload_file="$RUNNER_TEMP/dataflow-workload/$workload_role.log"
