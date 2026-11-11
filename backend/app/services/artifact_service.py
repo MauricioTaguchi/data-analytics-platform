@@ -239,7 +239,10 @@ class ArtifactService:
             return True
         return bool(
             db.query(Report.id)
-            .filter(Report.file_path.in_(spellings), Report.status == "completed")
+            .filter(or_(
+                and_(Report.file_path.in_(spellings), Report.status == "completed"),
+                and_(Report.snapshot_path.in_(spellings), Report.status.in_({"queued", "processing"})),
+            ))
             .first()
         )
 

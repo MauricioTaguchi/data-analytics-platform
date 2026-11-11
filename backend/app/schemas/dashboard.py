@@ -45,3 +45,8 @@ class ChartDataResponse(BaseModel):
     labels: list[Any]
     values: list[Any]
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    total_count: int | None = None
+    returned_count: int | None = None
+    truncated: bool = False
+    omitted_count: int = 0
+    grouped_count: int = 0

@@ -1,0 +1,53 @@
+name: Operational configuration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operations-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  monitoring-and-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Verify bounded HTTP workload and report privacy
+        run: python -m unittest discover -s ops -p 'test_*.py' -v
+      - name: Check optional monitoring configuration
+        env:
+          DATAFLOW_METRICS_TOKEN_FILE: ${{ runner.temp }}/dataflow-test-metrics-token
+        run: |
+          cp backend/.env.example backend/.env
+          printf '%s\n' 'ci-configuration-check-only' > "$DATAFLOW_METRICS_TOKEN_FILE"
+          chmod 444 "$DATAFLOW_METRICS_TOKEN_FILE"
+          docker compose -f docker-compose.yml -f ops/docker-compose.monitoring.yml --profile monitoring config --quiet
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/ops:/etc/prometheus:ro" \
+            -v "$PWD/ops/prometheus-alerts.yml:/etc/prometheus/dataflow-alerts.yml:ro" \
+            -v "$DATAFLOW_METRICS_TOKEN_FILE:/run/secrets/dataflow_metrics_token:ro" \
+            prom/prometheus:v3.13.5 check config /etc/prometheus/prometheus.example.yml
+          docker run --rm --entrypoint amtool \
+            -v "$PWD/ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+            prom/alertmanager:v0.35.0 check-config /etc/alertmanager/alertmanager.yml
+      - name: Verify alert firing, recovery, and telemetry gating
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/ops:/work:ro" -w /work \
+            prom/prometheus:v3.13.5 test rules prometheus-alerts.test.yml
+      - name: Remove temporary configuration credential
+        if: always()
+        run: rm -f "$RUNNER_TEMP/dataflow-test-metrics-token"

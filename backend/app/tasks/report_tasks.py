@@ -1,4 +1,3 @@
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,8 @@ from app.models.project import Project
 from app.models.report import Report
 from app.services.artifact_service import ArtifactService
 from app.services.dataset_service import DatasetService
+from app.services.engines import ResourcePolicy, SnapshotRef
+from app.services.engines.runner import run_profile
 from app.services.job_service import (
     JobCancellationRequested,
     JobLeaseUnavailable,
@@ -31,7 +32,11 @@ class ReportProjectSnapshot:
 class ReportDatasetSnapshot:
     original_filename: str
     stored_path: str
-    profile_json: dict[str, Any] | None
+    profile_json: dict[str, Any]
+    dataset_version: int
+    snapshot_id: str | None
+    snapshot_version: int | None
+    snapshot_sha256: str | None
 
 
 def _validate_report_target(db, task_id: str, report_id: int) -> None:
@@ -105,18 +110,32 @@ def generate_report_task(self, report_id: int):
             stage="profiling",
         )
         db.commit()
-        project = db.query(Project).filter(Project.id == report.project_id).first()
-        dataset = db.query(Dataset).filter(Dataset.id == report.dataset_id).first()
-        if not project or not dataset:
-            raise ValueError("The report project or dataset no longer exists.")
-        owner_id = int(project.owner_id)
-        project_snapshot = ReportProjectSnapshot(name=project.name)
-        dataset_snapshot = ReportDatasetSnapshot(
-            original_filename=str(dataset.original_filename),
-            stored_path=str(dataset.stored_path),
-            profile_json=deepcopy(dataset.profile_json),
+        if (report.snapshot_path is None or report.dataset_version is None
+                or report.source_filename is None or report.source_project_name is None):
+            raise ValueError("This legacy report has no recorded source. Create a new report to bind a dataset revision.")
+        owner_id = int(job.owner_id)
+        project_snapshot = ReportProjectSnapshot(name=report.source_project_name)
+        # Do not consult the mutable dataset head or its cached profile here.
+        # Re-deliveries and recovered attempts use this exact admission record.
+        input_path = report.snapshot_path
+        input_revision = report.dataset_version
+        input_filename = report.source_filename
+        input_snapshot_id = report.snapshot_id
+        input_snapshot_version = report.snapshot_version
+        input_digest = report.snapshot_sha256
+        input_size = report.snapshot_size_bytes
+        _lease_checkpoint(db, task_id, attempt_token)
+        policy = ResourcePolicy.configured(quota_remaining_bytes=settings.MAX_JOB_RESULT_SIZE_MB * 1024 * 1024)
+        profile = run_profile(
+            SnapshotRef(Path(input_path)), policy,
+            lambda: _lease_checkpoint(db, task_id, attempt_token),
+            expected_sha256=input_digest, expected_size_bytes=input_size,
         )
-
+        dataset_snapshot = ReportDatasetSnapshot(
+            original_filename=input_filename, stored_path=input_path, profile_json=profile,
+            dataset_version=input_revision, snapshot_id=input_snapshot_id,
+            snapshot_version=input_snapshot_version, snapshot_sha256=input_digest,
+        )
         _lease_checkpoint(db, task_id, attempt_token)
         output_dir = Path(settings.REPORT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)

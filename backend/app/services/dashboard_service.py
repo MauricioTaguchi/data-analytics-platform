@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import math
 
 import pyarrow.parquet as pq
 import pandas as pd
@@ -13,7 +14,7 @@ from app.services.dataset_service import DatasetService
 from app.services.chart_cache import chart_cache
 from app.services.chart_filters import apply_filters, column_kind
 from app.services.chart_query import (
-    json_value, query_gate, query_parquet, required_columns, validate_chart,
+    bounded_result, json_value, pie_result, query_gate, query_parquet, required_columns, validate_chart,
 )
 
 class DashboardService:
@@ -127,7 +128,15 @@ class DashboardService:
 
         if chart.chart_type == "table":
             preview = df.head(100).astype(object).where(pd.notna(df.head(100)), None)
-            return {"labels": [], "values": [], "rows": preview.to_dict(orient="records")}
+            return bounded_result([], [], total_count=len(df), rows=preview.to_dict(orient="records"))
+
+        if chart.chart_type == "scatter":
+            x, y = df[chart.x_column], df[chart.y_column]
+            valid = x.map(lambda value: pd.notna(value) and math.isfinite(float(value))) & y.map(
+                lambda value: pd.notna(value) and math.isfinite(float(value)))
+            total = int(valid.sum())
+            return bounded_result(json_value(x[valid].head(100).tolist()), json_value(y[valid].head(100).tolist()),
+                                  total_count=total, omitted_count=len(df) - total)
 
         if chart.chart_type == "histogram":
             if not chart.x_column or chart.x_column not in df.columns:
@@ -148,6 +157,10 @@ class DashboardService:
                 raise ValueError("Invalid value column.")
             agg = chart.aggregation or "count"
             series = df[column]
+            if agg == "sum" and pd.api.types.is_integer_dtype(series.dtype):
+                # NumPy int64 reductions wrap silently; Python integers retain
+                # the exact admitted sum, matching DuckDB's wider accumulator.
+                series = series.astype(object)
             value = {
                 "sum": series.sum,
                 "mean": series.mean,
@@ -166,25 +179,37 @@ class DashboardService:
 
         if chart.chart_type == "pie":
             if chart.y_column and chart.y_column in df.columns:
+                values = df[chart.y_column]
+                aggregation = chart.aggregation or "sum"
+                if aggregation != "count" and any(not math.isfinite(float(value)) for value in values.dropna()):
+                    raise ValueError("Pie charts require finite, non-negative category values.")
+                if pd.api.types.is_bool_dtype(values.dtype):
+                    df = df.assign(**{chart.y_column: values.astype("Int64")})
+                    values = df[chart.y_column]
+                if aggregation == "sum" and pd.api.types.is_integer_dtype(values.dtype):
+                    df = df.assign(**{chart.y_column: values.astype(object)})
                 grouped = (
                     df.groupby(chart.x_column, dropna=False)[chart.y_column]
                     .agg(chart.aggregation or "sum")
                 )
-                grouped = cls._drop_nan_aggregates(grouped).head(20)
+                grouped = cls._drop_nan_aggregates(grouped)
             else:
-                grouped = df[chart.x_column].astype(str).value_counts().head(20)
-            return {
-                "labels": [str(value) for value in grouped.index.tolist()],
-                "values": [value.item() if hasattr(value, "item") else value for value in grouped.values],
-                "rows": [],
-            }
+                grouped = df[chart.x_column].astype(str).value_counts()
+            return pie_result(
+                [str(value) for value in grouped.index.tolist()],
+                [value.item() if hasattr(value, "item") else value for value in grouped.values],
+            )
 
         if not chart.y_column or chart.y_column not in df.columns:
             raise ValueError("Invalid Y column.")
 
         agg = chart.aggregation or "sum"
+        if agg == "sum" and pd.api.types.is_integer_dtype(df[chart.y_column].dtype):
+            df = df.assign(**{chart.y_column: df[chart.y_column].astype(object)})
         grouped = df.groupby(chart.x_column, dropna=False)[chart.y_column].agg(agg)
-        grouped = cls._drop_nan_aggregates(grouped).head(100)
+        grouped = cls._drop_nan_aggregates(grouped)
+        total = len(grouped)
+        grouped = grouped.head(100)
         labels = [str(v) for v in grouped.index.tolist()]
         values = [v.item() if hasattr(v, "item") else v for v in grouped.tolist()]
-        return {"labels": labels, "values": values, "rows": []}
+        return bounded_result(labels, values, total_count=total)

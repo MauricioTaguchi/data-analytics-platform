@@ -48,30 +48,79 @@ export function calculateQuality(rows: DataRow[]) {
   return { duplicateCount, missingCount, score: Math.max(0, Math.round(100 - duplicateCount * 5 - missingCount * 3)) };
 }
 
+export function exportCsvText(rows: DataRow[], columns: string[]): string {
+  const quote = (value: string) => `"${value.replace(/"/g, '""')}"`;
+  const encode = (value: DataRow[string] | undefined): string => {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return quote(value);
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error("CSV export requires finite numbers. Correct invalid numeric values first.");
+    }
+    return String(value);
+  };
+  return `${[columns.map(quote).join(","), ...rows.map((row) => columns.map((column) => encode(row[column])).join(","))].join("\r\n")}\r\n`;
+}
+
+type CsvField = { text: string; quoted: boolean };
+
 export function parseCsvText(text: string): DataRow[] {
-  const records: string[][] = [];
-  let record: string[] = [];
+  const source = text.replace(/^\uFEFF/, "");
+  const records: CsvField[][] = [];
+  let record: CsvField[] = [];
   let field = "";
   let quoted = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    const nextCharacter = text[index + 1];
+  let wasQuoted = false;
+  let closedQuote = false;
+  const finishField = () => {
+    record.push({ text: wasQuoted ? field : field.trim(), quoted: wasQuoted });
+    field = "";
+    wasQuoted = false;
+    closedQuote = false;
+  };
+  const finishRecord = (lineBreak = false) => {
+    const hasContent = record.length > 0 || field.trim() !== "" || wasQuoted
+      || (lineBreak && records[0]?.length === 1);
+    finishField();
+    if (hasContent) records.push(record);
+    record = [];
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const nextCharacter = source[index + 1];
     if (character === '"' && quoted && nextCharacter === '"') {
       field += '"'; index += 1;
-    } else if (character === '"') quoted = !quoted;
-    else if (character === "," && !quoted) { record.push(field.trim()); field = ""; }
+    } else if (character === '"' && quoted) {
+      quoted = false;
+      closedQuote = true;
+    } else if (character === '"' && field === "" && !closedQuote) {
+      quoted = true;
+      wasQuoted = true;
+    } else if (character === "," && !quoted) finishField();
     else if ((character === "\n" || character === "\r") && !quoted) {
       if (character === "\r" && nextCharacter === "\n") index += 1;
-      record.push(field.trim());
-      if (record.some(Boolean)) records.push(record);
-      record = []; field = "";
-    } else field += character;
+      finishRecord(true);
+    } else {
+      if (closedQuote || (character === '"' && !quoted)) {
+        throw new Error("Invalid CSV quoting. Use double quotes around fields and double any quotes inside them.");
+      }
+      field += character;
+    }
   }
-  record.push(field.trim());
-  if (record.some(Boolean)) records.push(record);
+  if (quoted) throw new Error("Invalid CSV quoting. A quoted field was not closed.");
+  finishRecord();
   const [header, ...rows] = records;
   if (!header?.length || rows.length === 0) throw new Error("The CSV file does not contain any data rows.");
-  return rows.slice(0, 100).map((values) => Object.fromEntries(
-    header.map((column, index) => [column, values[index] === "" || values[index] === undefined ? null : coerceValue(values[index])]),
-  ));
+  const columns = header.map((cell) => cell.text);
+  if (columns.some((column) => column.trim() === "") || new Set(columns).size !== columns.length) {
+    throw new Error("CSV column names must be nonempty and unique.");
+  }
+  for (const [index, values] of rows.entries()) {
+    if (values.length !== columns.length) throw new Error(`CSV row ${index + 2} has ${values.length} fields; expected ${columns.length}.`);
+  }
+  return rows.slice(0, 100).map((values) => Object.fromEntries(columns.map((column, index) => {
+    const cell = values[index];
+    const value = cell.quoted ? cell.text : cell.text === "" ? null
+      : cell.text === "true" ? true : cell.text === "false" ? false : coerceValue(cell.text);
+    return [column, value];
+  })));
 }

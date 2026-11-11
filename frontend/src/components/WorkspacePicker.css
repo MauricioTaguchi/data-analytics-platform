@@ -1,0 +1,11 @@
+.workspace-picker { margin-bottom: 18px; padding: 18px; }
+.workspace-picker-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.workspace-picker-heading h2 { margin: 0; font-size: 14px; }
+.workspace-picker-heading p, .workspace-picker-status { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.workspace-picker .field-row { margin: 14px 0 10px; }
+.workspace-picker .field-row label { min-width: 0; }
+.workspace-picker-status[role="alert"] { color: var(--text); }
+@media (max-width: 600px) {
+  .workspace-picker { padding: 14px; }
+  .workspace-picker-heading { align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+}

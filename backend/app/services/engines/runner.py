@@ -215,8 +215,19 @@ def run_quality(snapshot: SnapshotRef, rules: list[dict], policy: ResourcePolicy
     return _run_metadata("quality", snapshot, policy, checkpoint, rules=rules)
 
 
-def run_profile(snapshot: SnapshotRef, policy: ResourcePolicy, checkpoint=None) -> dict:
-    return _run_metadata("profile", snapshot, policy, checkpoint)
+def run_profile(
+    snapshot: SnapshotRef, policy: ResourcePolicy, checkpoint=None,
+    *, expected_sha256: str | None = None, expected_size_bytes: int | None = None,
+) -> dict:
+    return _run_metadata(
+        "profile", snapshot, policy, checkpoint,
+        expected_sha256=expected_sha256, expected_size_bytes=expected_size_bytes,
+    )
+
+
+def run_dataset_preview(snapshot: SnapshotRef, page: int, page_size: int, policy: ResourcePolicy) -> dict:
+    """Return a bounded JSON page; dataframes never enter the API process."""
+    return _run_metadata("dataset_preview", snapshot, policy, None, page=page, page_size=page_size)
 
 
 def run_inspection(snapshot: SnapshotRef, policy: ResourcePolicy, checkpoint=None) -> dict:
@@ -278,12 +289,31 @@ def _child_dispatch(payload: dict, policy: ResourcePolicy) -> dict:
         from app.services.quality_service import evaluate_quality
 
         return evaluate_quality(snapshot.path, payload["rules"])
-    if kind in {"profile", "inspection", "preview"}:
+    if kind in {"profile", "inspection", "preview", "dataset_preview"}:
         from app.services.dataset_service import DatasetService
 
         source = SimpleNamespace(stored_path=str(snapshot.path), status="ready")
         if kind == "profile":
-            return DatasetService.build_profile(source)
+            from app.services.snapshot_service import SnapshotService
+
+            expected_sha256 = payload.get("expected_sha256")
+            expected_size_bytes = payload.get("expected_size_bytes")
+
+            def verify_profile_source():
+                identity = SnapshotService.digest(snapshot.path)
+                if ((expected_sha256 is not None and identity.sha256 != expected_sha256) or
+                        (expected_size_bytes is not None and identity.size_bytes != expected_size_bytes)):
+                    raise ValueError("The report snapshot failed integrity verification.")
+                return identity
+
+            identity = verify_profile_source() if expected_sha256 is not None or expected_size_bytes is not None else None
+            result = DatasetService.build_profile(source)
+            if identity is not None:
+                identity.assert_unchanged(snapshot.path)
+                verify_profile_source()
+            return result
+        if kind == "dataset_preview":
+            return DatasetService._preview_page_in_child(source, payload["page"], payload["page_size"])
         if kind == "inspection":
             return DatasetService.inspect_staged_dataset(source)
         class ChildAdapter:

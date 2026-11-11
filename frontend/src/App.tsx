@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { checkApiHealth, describeApiError, downloadDataset, type AuthenticationInput } from "./api-client";
+import { exportCsvText } from "./data-utils";
+import { processingState } from "./processing-state";
+import { WorkspacePicker } from "./components/WorkspacePicker";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import { DatasetWorkspace } from "./components/DatasetWorkspace";
@@ -42,7 +45,7 @@ export function App() {
   const { theme, toggleTheme } = useTheme();
   const auth = useAuthentication();
   const jobs = useProfilingJob();
-  const workspace = useDatasetUpload();
+  const workspace = useDatasetUpload(auth.project?.id ?? null);
   const transformations = useTransformations(workspace.dataset, workspace.rows, workspace.setRows, workspace.refresh, jobs.track, workspace.columns, auth.live);
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("overview");
   const [notice, setNotice] = useState("The portfolio sample is ready. Connect the API to enable persistent workflows.");
@@ -56,8 +59,7 @@ export function App() {
   const lifecycleOperation = useRef(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const combinedBusy = busy || lifecycleBusy || auth.busy;
-  const progress = jobs.jobs.find((job) => !isTerminalJobStatus(job.status))?.progress
-    ?? (workspace.uploadPhase === "uploading" ? workspace.uploadProgress : 100);
+  const processing = processingState(jobs.jobs, workspace.uploadPhase, workspace.uploadProgress, workspace.workflowStatus);
   const uploadLabel = workspace.uploadPhase === "uploading"
     ? `Uploading ${workspace.uploadProgress}%`
     : combinedBusy ? "Processing…" : "Upload dataset";
@@ -107,7 +109,8 @@ export function App() {
   async function connect(input: AuthenticationInput) {
     try {
       const project = await auth.connect(input);
-      setConnectionOpen(false); setNotice(`Connected to “${project.name}”. Upload a file to start the persistent workflow.`);
+      jobs.reset(); workspace.reset(); transformations.reset();
+      setConnectionOpen(false); setNotice(`Connected to “${project.name}”. Choose a saved dataset to resume, or upload a new file.`);
     } catch (error) { setNotice(describeApiError(error)); }
   }
 
@@ -151,9 +154,29 @@ export function App() {
     });
   }
 
+  function selectProject(projectId: number) {
+    try {
+      auth.selectProject(projectId);
+      jobs.reset(); workspace.reset(); transformations.reset();
+      setNotice("Project selected. Choose a saved dataset to continue its history.");
+    } catch (error) { setNotice(describeApiError(error)); }
+  }
+
+  async function openSavedDataset(datasetId: number) {
+    setBusy(true);
+    jobs.reset();
+    setNotice("Opening the saved dataset and its current revision…");
+    try {
+      const dataset = await workspace.openDataset(datasetId);
+      transformations.reset();
+      setActiveSection("datasets");
+      setNotice(`Opened “${dataset.original_filename}” at revision ${dataset.version}. Its transformation history is available without reuploading.`);
+    } catch (error) { setNotice(describeApiError(error)); } finally { setBusy(false); }
+  }
+
   async function upload(file?: File) {
     if (!file) return;
-    setBusy(true); transformations.reset(); setNotice("Uploading and validating the dataset…");
+    setBusy(true); jobs.reset(); transformations.reset(); setNotice("Uploading and validating the dataset…");
     try {
       const result = await workspace.upload(file, auth.project?.id || null, jobs.track);
       setNotice(result.mode === "live" ? "Import and profiling completed through the worker queue." : "CSV loaded locally. Connect the API for durable processing.");
@@ -187,19 +210,19 @@ export function App() {
         const download = await downloadDataset(workspace.dataset.id);
         saveBlob(download.blob, download.filename);
       } else {
-        const csv = [workspace.columns.join(","), ...workspace.rows.map((row) => workspace.columns.map((column) => JSON.stringify(row[column] ?? "")).join(","))].join("\n");
-        saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `processed-${workspace.datasetName}`);
+        const csv = exportCsvText(workspace.rows, workspace.columns);
+        saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `preview-${workspace.datasetName}`);
       }
-      setNotice("The current dataset version is ready for download.");
+      setNotice(workspace.dataset ? "The current dataset version is ready for download." : `Exported ${workspace.rows.length} loaded preview rows. Local CSV previews include at most 100 source rows.`);
     } catch (error) { setNotice(describeApiError(error)); }
   }
 
-  const content = activeSection === "datasets" ? <><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} /><QualityContracts key={workspace.dataset?.id || "demo"} datasetId={workspace.dataset?.id || null} version={workspace.dataset?.version || 0} columns={workspace.columns} busy={combinedBusy} onTrack={jobs.track} /></>
-    : activeSection === "transformations" ? <div className="work-grid"><TransformationBuilder live={auth.live} busy={combinedBusy || transformations.undoNeedsRecovery || (auth.live && !workspace.dataset)} columns={workspace.columns} operation={transformations.operation} draft={transformations.draft} engine={transformations.engine} catalog={transformations.catalog} catalogError={transformations.catalogError} preview={transformations.preview} onOperation={transformations.setOperation} onDraft={transformations.setDraft} onEngine={transformations.setEngine} onRetryCatalog={transformations.retryCatalog} onPreview={previewTransformation} onApply={applyTransformation} /><div className="side-stack"><LineageTimeline history={transformations.history} sourceName={workspace.datasetName} live={auth.live} canUndo={auth.live ? transformations.history.some((item) => item.status === "completed" && !item.undone_at) : transformations.localSnapshots.length > 0} busy={combinedBusy} undoNeedsRecovery={transformations.undoNeedsRecovery} onUndo={undoTransformation} />{workspace.dataset ? <SnapshotHistory key={workspace.dataset.id} datasetId={workspace.dataset.id} version={workspace.dataset.version} busy={combinedBusy} /> : null}</div></div>
+  const content = activeSection === "datasets" ? <><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} processing={processing} /><QualityContracts key={workspace.dataset?.id || "demo"} datasetId={workspace.dataset?.id || null} version={workspace.dataset?.version || 0} columns={workspace.columns} busy={combinedBusy} onTrack={jobs.track} /></>
+    : activeSection === "transformations" ? <div className="work-grid"><TransformationBuilder live={auth.live} busy={combinedBusy || transformations.undoNeedsRecovery || (auth.live && !workspace.dataset)} columns={workspace.columns} operation={transformations.operation} draft={transformations.draft} engine={transformations.engine} catalog={transformations.catalog} catalogError={transformations.catalogError} preview={transformations.preview} onOperation={transformations.setOperation} onDraft={transformations.setDraft} onEngine={transformations.setEngine} onRetryCatalog={transformations.retryCatalog} onPreview={previewTransformation} onApply={applyTransformation} /><div className="side-stack"><LineageTimeline history={transformations.history} sourceName={workspace.datasetName} live={auth.live} canUndo={auth.live ? transformations.history.some((item) => item.status === "completed" && !item.undone_at) : transformations.localSnapshots.length > 0} busy={combinedBusy || transformations.historyLoading} undoNeedsRecovery={transformations.undoNeedsRecovery} onUndo={undoTransformation} />{transformations.historyError ? <div className="notice" role="alert">History could not be loaded: {transformations.historyError}<button className="secondary" disabled={combinedBusy || transformations.historyLoading} onClick={() => void transformations.loadHistory().catch(() => undefined)}>Retry history</button></div> : null}{workspace.dataset ? <SnapshotHistory key={workspace.dataset.id} datasetId={workspace.dataset.id} version={workspace.dataset.version} busy={combinedBusy} /> : null}</div></div>
     : activeSection === "dashboards" ? <DashboardWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} rows={workspace.rows} columns={workspace.columns} externalBusy={combinedBusy} onNotice={setNotice} onBusyChange={setBusy} />
     : activeSection === "reports" ? <ReportsWorkspace live={auth.live} projectId={auth.project?.id || null} datasetId={workspace.dataset?.id || null} datasetName={workspace.datasetName} rows={workspace.dataset?.row_count || workspace.rows.length} columns={workspace.dataset?.column_count || workspace.columns.length} externalBusy={combinedBusy} onNotice={setNotice} onTrack={jobs.track} onBusyChange={setBusy} />
     : activeSection === "monitoring" ? <OperationsMonitor jobs={jobs.jobs} live={auth.live} apiStatus={apiStatus} onResume={(taskId) => void jobs.resume(taskId).then(() => setNotice("Monitoring resumed and the job completed."), (error) => setNotice(describeApiError(error)))} onCancel={(taskId) => void jobs.cancel(taskId).then(() => setNotice("Cancellation requested. The worker will stop at the next safe checkpoint."), (error) => setNotice(describeApiError(error)))} />
-    : <><section className="metric-grid hero-metrics" aria-label="Dataset summary">{metrics.map((metric) => <div className="metric-card" key={metric.label}><span className="metric-icon"><WorkspaceIcon name={metric.icon} size={21} /></span><span className="metric-label">{metric.label}</span><strong>{metric.value.toLocaleString("en-US")}</strong><small>{metric.caption}</small></div>)}</section><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} progress={progress} /></>;
+    : <><section className="metric-grid hero-metrics" aria-label="Dataset summary">{metrics.map((metric) => <div className="metric-card" key={metric.label}><span className="metric-icon"><WorkspaceIcon name={metric.icon} size={21} /></span><span className="metric-label">{metric.label}</span><strong>{metric.value.toLocaleString("en-US")}</strong><small>{metric.caption}</small></div>)}</section><DatasetWorkspace rows={workspace.rows} columns={workspace.columns} live={auth.live} processing={processing} /></>;
 
   return <div className="app-shell">
     <WorkspaceSidebar activeSection={activeSection} mobileOpen={mobileNav} live={auth.live} busy={combinedBusy} onNavigate={setActiveSection} onCloseMobile={closeMobileNav} onCheckApi={checkHealth} onConnect={() => setConnectionOpen(true)} onDisconnect={() => void disconnect()} />
@@ -212,9 +235,10 @@ export function App() {
         <div className="top-actions"><button className="secondary" disabled={combinedBusy} onClick={() => void restoreSample()}>Use sample</button>{workspace.uploadPhase !== "idle" ? <button className="secondary" onClick={() => void workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options)).then((cancelled) => { if (cancelled) setNotice("Cancelling the active workflow…"); })}>Cancel workflow</button> : null}<label className={`primary file-button${combinedBusy ? " disabled" : ""}`} aria-disabled={combinedBusy}><WorkspaceIcon name="upload" size={17} />{uploadLabel}<input aria-label="Upload dataset file" type="file" accept=".csv,.xlsx,.xls,.json,.parquet" disabled={combinedBusy} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void upload(file); }} /></label></div>
       </section>
       <div className="notice" role="status" aria-live="polite"><span aria-hidden="true">i</span>{notice}</div>
+      {auth.live && auth.project ? <WorkspacePicker projects={auth.projects} projectId={auth.project.id} datasets={workspace.datasets} datasetId={workspace.dataset?.id ?? null} loading={workspace.catalogLoading} error={workspace.catalogError} busy={combinedBusy} onProject={selectProject} onDataset={(datasetId) => void openSavedDataset(datasetId)} onRefresh={workspace.reloadCatalog} /> : null}
       <section className="dataset-strip" aria-label="Current dataset"><div className="dataset-identity"><span className="dataset-icon"><WorkspaceIcon name="datasets" size={18} /></span><strong title={workspace.datasetName}>{workspace.datasetName}</strong><span className="status-pill">{workspace.dataset ? `Revision ${workspace.dataset.version}` : "Local preview"}</span></div><button className="text-button" onClick={() => setActiveSection(activeSection === "transformations" ? "datasets" : "transformations")}>{activeSection === "transformations" ? "Inspect dataset" : "View transformations"}<WorkspaceIcon name="chevron" size={15} /></button></section>
       {content}
-      <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{auth.live ? "Authenticated session · server persistence" : "Demo workspace · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />Export current version</button></footer>
+      <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{workspace.dataset ? "Authenticated session · server persistence" : "Local preview · up to 100 rows · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />{workspace.dataset ? "Export current version" : "Export preview CSV (up to 100 rows)"}</button></footer>
     </main>
     {connectionOpen ? <ConnectionPanel busy={auth.busy} onClose={() => setConnectionOpen(false)} onSubmit={connect} /> : null}
     {tourStep !== null ? <div className="tour-backdrop" role="presentation"><section ref={tourDialog} tabIndex={-1} className="tour-dialog" role="dialog" aria-modal="true" aria-labelledby="tour-title"><span className="tour-progress">{tourStep + 1} of {TOUR_STEPS.length}</span><h2 id="tour-title">{TOUR_STEPS[tourStep].title}</h2><p>{TOUR_STEPS[tourStep].body}</p><div className="tour-dots" aria-hidden="true">{TOUR_STEPS.map((_, index) => <span key={index} className={index === tourStep ? "active" : ""} />)}</div><div className="button-row"><button className="secondary" onClick={() => setTourStep(null)}>Skip tour</button><button className="primary" data-dialog-initial-focus="true" onClick={() => setTourStep(tourStep === TOUR_STEPS.length - 1 ? null : tourStep + 1)}>{tourStep === TOUR_STEPS.length - 1 ? "Explore DataFlow" : "Next"}</button></div></section></div> : null}

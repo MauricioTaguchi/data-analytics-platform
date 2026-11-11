@@ -107,4 +107,99 @@ describe("DashboardWorkspace", () => {
     expect(markup).toContain("—");
     expect(markup).not.toContain(">0<");
   });
+
+  it("includes every pie category in its total and combines the remainder", () => {
+    const data = { labels: Array.from({ length: 9 }, (_, index) => `Category ${index + 1}`), values: Array(9).fill(1), rows: [] };
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="pie" />);
+
+    expect(markup).toContain("All 9 categories are included");
+    expect(markup).toContain("Other (2 categories)");
+    expect(markup).toContain(">9</span>");
+    expect(markup).toContain("22.2%");
+    expect(markup.match(/<strong>11\.1%<\/strong>/g)).toHaveLength(7);
+  });
+
+  it("preserves the complete total when the API already combined pie categories", () => {
+    const data = {
+      labels: [...Array.from({ length: 19 }, (_, index) => `Category ${index + 1}`), "Other"],
+      values: [...Array(19).fill(1), 81], rows: [], total_count: 100, returned_count: 20, grouped_count: 81, truncated: false,
+    };
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="pie" />);
+
+    expect(markup).toContain("All 100 categories are included");
+    expect(markup).toContain("Other (93 categories)");
+    expect(markup).toContain(">100</span>");
+    expect(markup).toContain("93.0%");
+  });
+
+  it.each([-1, null, "", "invalid", Number.POSITIVE_INFINITY])("does not disguise invalid pie values as zero: %s", (value) => {
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: ["A", "B"], values: [10, value], rows: [] }} type="pie" />);
+    expect(markup).toContain("Pie chart unavailable");
+    expect(markup).not.toContain("conic-gradient");
+  });
+
+  it("does not invent a pie distribution from zero or truncated data", () => {
+    expect(renderToStaticMarkup(<ChartVisual data={{ labels: ["A"], values: [0], rows: [] }} type="pie" />)).toContain("No positive total");
+    expect(renderToStaticMarkup(<ChartVisual data={{ labels: ["A"], values: [10], rows: [], truncated: true, total_count: 2 }} type="pie" />)).toContain("Incomplete pie data");
+  });
+
+  it("builds scatter data from original paired rows without aggregating duplicate X values", () => {
+    const data = buildLocalChartData([
+      { x: 0, y: 20 }, { x: 1, y: 30 }, { x: 1, y: 10 }, { x: 100, y: 20 },
+      { x: null, y: 40 }, { x: 2, y: null }, { x: "invalid", y: 80 },
+    ], "x", "y", "sum", "scatter");
+
+    expect(data.labels).toEqual([0, 1, 1, 100]);
+    expect(data.values).toEqual([20, 30, 10, 20]);
+    expect(data).toMatchObject({ total_count: 4, returned_count: 4, omitted_count: 3, truncated: false });
+    const markup = renderToStaticMarkup(<ChartVisual data={data} type="scatter" />);
+    const xPositions = [...markup.matchAll(/<circle[^>]*cx="([^"]+)"/g)].map((match) => Number(match[1]));
+    expect(xPositions).toEqual([30, 35.4, 35.4, 570]);
+    expect(markup).toContain("X: 1; Y: 10");
+    expect(markup).toContain("3 rows without a finite numeric X/Y pair were excluded");
+    expect(markup).not.toContain("polyline");
+  });
+
+  it("excludes invalid scatter pairs together so X and Y never shift", () => {
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: [0, "bad", 100], values: [10, 900, 20], rows: [] }} type="scatter" />);
+    expect(markup.match(/<circle /g)).toHaveLength(2);
+    expect(markup).toContain("X: 100; Y: 20");
+    expect(markup).not.toContain("900");
+    expect(markup).toContain("1 rows without a finite numeric X/Y pair were excluded");
+  });
+
+  it("keeps missing line values as gaps without connecting across them", () => {
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: ["A", "B", "C"], values: [10, null, 20], rows: [] }} type="line" />);
+    expect(markup).toContain("shown as gaps, not zero");
+    expect(markup.match(/<circle /g)).toHaveLength(2);
+    expect(markup).not.toContain("polyline");
+  });
+
+  it("renders signed bars around zero and does not give zero or missing values a fake height", () => {
+    const markup = renderToStaticMarkup(<ChartVisual data={{ labels: ["positive", "negative", "zero", "missing"], values: [10, -10, 0, null], rows: [] }} />);
+    expect(markup).toContain("Negative values extend below the zero baseline");
+    expect(markup).toContain('class="negative" style="position:absolute;top:50%;height:50%');
+    expect(markup).toContain("height:0%");
+    expect(markup).toContain('class="bar-value">—</div>');
+  });
+
+  it("announces every display limit, including API truncation", () => {
+    const labels = Array.from({ length: 30 }, (_, index) => index);
+    const data = { labels, values: labels, rows: [], total_count: 150, returned_count: 30, truncated: true };
+    expect(renderToStaticMarkup(<ChartVisual data={data} />)).toContain("Showing the first 12 of 150 categories");
+    expect(renderToStaticMarkup(<ChartVisual data={data} type="line" />)).toContain("Showing the first 24 of 150 categories");
+    expect(renderToStaticMarkup(<ChartVisual data={data} type="scatter" />)).toContain("Showing the first 30 of 150 numeric pairs");
+    const tableData = { ...data, labels: [], values: [], rows: labels.map((value) => ({ value })) };
+    expect(renderToStaticMarkup(<ChartVisual data={tableData} type="table" />)).toContain("Showing the first 20 of 150 rows");
+  });
+
+  it("bounds local scatter and table previews with explicit total counts", () => {
+    const data = Array.from({ length: 105 }, (_, index) => ({ x: index, y: index * 2 }));
+    const scatter = buildLocalChartData(data, "x", "y", "sum", "scatter");
+    expect(scatter.labels).toHaveLength(100);
+    expect(scatter).toMatchObject({ total_count: 105, returned_count: 100, truncated: true });
+    const table = buildLocalChartData(data, "x", "y", "sum", "table");
+    expect(table.rows).toHaveLength(100);
+    expect(table).toMatchObject({ total_count: 105, returned_count: 100, truncated: true });
+  });
 });

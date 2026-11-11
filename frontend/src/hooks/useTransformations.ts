@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { applyDatasetTransformation, fetchTransformationHistory, fetchOperationCatalog, describeApiError, isAmbiguousJobCreationError, isRequestCancelled, previewDatasetTransformation, reconcileCreatedJob, type Dataset, type JobStatus, type TransformationPreview, type TransformationResult } from "../api-client";
 import { calculateQuality, type DataRow } from "../data-utils";
 import { applyLocalParameters, buildOperationParameters, DEMO_OPERATIONS, emptyOperationDraft, type OperationDefinition } from "../operation-contracts";
@@ -20,6 +20,15 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   const [undoNeedsRecovery, setUndoNeedsRecovery] = useState(false);
   const columns = schemaColumns || Object.keys(rows[0] || {});
   const datasetId = dataset?.id ?? null;
+  const activeDatasetId = useRef(datasetId);
+  const generation = useRef(0);
+  activeDatasetId.current = datasetId;
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyAttempt, setHistoryAttempt] = useState(0);
+  function assertCurrent(expectedDatasetId: number | null, expectedGeneration: number) {
+    if (activeDatasetId.current !== expectedDatasetId || generation.current !== expectedGeneration) throw new DOMException("Dataset selection changed.", "AbortError");
+  }
   const catalog = live ? remoteCatalog?.datasetId === datasetId ? remoteCatalog.operations : [] : DEMO_OPERATIONS;
   const definition = catalog.find((item) => item.operation === operation) || catalog[0];
   const selectedEngine = definition?.engines[engine] ? engine : Object.keys(definition?.engines || {})[0];
@@ -47,19 +56,35 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
 
 
   const loadHistory = useCallback(async (signal?: AbortSignal) => {
-    if (!datasetId) { setHistory([]); return; }
-    setHistory(await fetchTransformationHistory(datasetId, signal));
+    if (!datasetId) { setHistory([]); setHistoryLoading(false); setHistoryError(""); return; }
+    const requestedGeneration = generation.current;
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const result = await fetchTransformationHistory(datasetId, signal);
+      signal?.throwIfAborted();
+      assertCurrent(datasetId, requestedGeneration);
+      setHistory(result);
+    } catch (error) {
+      if (!signal?.aborted && activeDatasetId.current === datasetId && generation.current === requestedGeneration) {
+        setHistoryError(describeApiError(error));
+        setHistory([]);
+      }
+      throw error;
+    } finally {
+      if (!signal?.aborted && activeDatasetId.current === datasetId && generation.current === requestedGeneration) setHistoryLoading(false);
+    }
   }, [datasetId]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadHistory(controller.signal).catch((error) => {
-      if (!isRequestCancelled(error)) setHistory([]);
-    });
+    setHistory([]);
+    void loadHistory(controller.signal).catch(() => undefined);
     return () => controller.abort();
-  }, [loadHistory]);
+  }, [loadHistory, historyAttempt]);
 
   async function previewOperation() {
+    const requestedGeneration = generation.current;
     if (live && !dataset) throw new Error("Upload a dataset before running a persistent transformation.");
     const payload = parameters();
     if (dataset) {
@@ -74,6 +99,7 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
         if (!recovered) throw error;
       }
       const completed = await track(trackingId, "Transformation preview");
+      assertCurrent(datasetId, requestedGeneration);
       const result = completed.result as unknown as TransformationPreview;
       if (!result?.before || !result?.after) throw new Error("The transformation preview returned an invalid result.");
       setPreview(result); return result;
@@ -88,6 +114,7 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   async function applyOperation() {
+    const requestedGeneration = generation.current;
     if (live && !dataset) throw new Error("Upload a dataset before running a persistent transformation.");
     const payload = parameters();
     if (dataset) {
@@ -102,7 +129,8 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
         if (!recovered) throw error;
       }
       await track(trackingId, "Dataset transformation");
-      await refresh(); await loadHistory(); setPreview(null); return;
+      assertCurrent(datasetId, requestedGeneration);
+      await refresh(); await loadHistory(); assertCurrent(datasetId, requestedGeneration); setPreview(null); return;
     }
     const nextRows = applyLocalParameters(rows, definition!.operation, payload);
     setLocalSnapshots((items) => [...items, rows.map((row) => ({ ...row }))]);
@@ -116,17 +144,20 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   async function undo() {
+    const requestedGeneration = generation.current;
     if (dataset) {
       try {
         await undoCoordinator.run(dataset, async () => {
+          assertCurrent(datasetId, requestedGeneration);
           setPreview(null);
           const results = await Promise.allSettled([refresh(), loadHistory()]);
           const failure = results.find((result) => result.status === "rejected");
           if (failure?.status === "rejected") throw failure.reason;
         });
+        assertCurrent(datasetId, requestedGeneration);
         setUndoNeedsRecovery(false);
       } catch (error) {
-        setUndoNeedsRecovery(undoCoordinator.needsRecovery(dataset.id));
+        if (activeDatasetId.current === datasetId && generation.current === requestedGeneration) setUndoNeedsRecovery(undoCoordinator.needsRecovery(dataset.id));
         throw error;
       }
       return;
@@ -140,7 +171,11 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
   }
 
   const reset = useCallback(() => {
+    generation.current += 1;
+    setHistoryAttempt((attempt) => attempt + 1);
     undoCoordinator.reset();
+    setHistoryLoading(false);
+    setHistoryError("");
     setDraft(emptyOperationDraft());
     setUndoNeedsRecovery(false);
     setPreview(null);
@@ -148,5 +183,5 @@ export function useTransformations(dataset: Dataset | null, rows: DataRow[], set
     setLocalSnapshots([]);
   }, [undoCoordinator]);
 
-  return { operation: definition?.operation || operation, setOperation: changeOperation, draft, setDraft: (next: typeof draft) => { setDraft(next); setPreview(null); }, engine: selectedEngine, setEngine: (next: string) => { setEngine(next); setPreview(null); }, catalog, catalogError, retryCatalog: () => setCatalogAttempt((attempt) => attempt + 1), preview, history, localSnapshots, previewOperation, applyOperation, undo, undoNeedsRecovery, loadHistory, reset };
+  return { operation: definition?.operation || operation, setOperation: changeOperation, draft, setDraft: (next: typeof draft) => { setDraft(next); setPreview(null); }, engine: selectedEngine, setEngine: (next: string) => { setEngine(next); setPreview(null); }, catalog, catalogError, retryCatalog: () => setCatalogAttempt((attempt) => attempt + 1), preview, history, historyLoading, historyError, localSnapshots, previewOperation, applyOperation, undo, undoNeedsRecovery, loadHistory, reset };
 }

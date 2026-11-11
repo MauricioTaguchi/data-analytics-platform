@@ -72,11 +72,13 @@ def test_parquet_queries_quote_columns_bind_values_and_keep_contains_literal(tmp
     frame.to_parquet(path, index=False)
     definition = chart(x_column=column, y_column="value", filters_json={column: {"eq": "a.b"}})
     result = query_parquet(path, definition)
-    assert result == {"labels": ["a.b"], "values": [1], "rows": []}
+    assert result == {"labels": ["a.b"], "values": [1], "rows": [], "total_count": 1,
+                      "returned_count": 1, "truncated": False, "omitted_count": 0, "grouped_count": 0}
     definition.filters_json = {column: {"contains": "."}}
     assert query_parquet(path, definition) is None
     assert DashboardService._build_pandas_chart(frame, definition) == {
         "labels": ["A.B", "a.b"], "values": [2, 1], "rows": [],
+        "total_count": 2, "returned_count": 2, "truncated": False, "omitted_count": 0, "grouped_count": 0,
     }
 
 

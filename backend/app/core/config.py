@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     MAX_PROFILE_CORRELATION_COLUMNS: int = Field(default=50, ge=2, le=250)
     TRANSFORMATION_PREVIEW_MAX_COLUMNS: int = Field(default=100, ge=1, le=1_000)
     TRANSFORMATION_PREVIEW_MAX_CELL_CHARS: int = Field(default=512, ge=32, le=10_000)
+    DATASET_PREVIEW_THREADS: int = Field(default=1, ge=1, le=8)
+    DATASET_PREVIEW_MEMORY_MB: int = Field(default=512, ge=64)
+    DATASET_PREVIEW_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=120)
+    DATASET_PREVIEW_MAX_CONCURRENT: int = Field(default=2, ge=1, le=32)
     TRANSFORMATION_ENGINE: Literal["pandas", "polars", "duckdb"] = "pandas"
     TRANSFORMATION_ENGINE_THREADS: int = Field(default=2, ge=1, le=16)
     TRANSFORMATION_ENGINE_MEMORY_MB: int = Field(default=512, ge=64)

@@ -1,0 +1,138 @@
+rule_files:
+  - prometheus-alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: sustained failures fire and clear after recovery
+    interval: 1m
+    input_series:
+      - series: 'up{job="dataflow",instance="api:8000"}'
+        values: '0x6 1x3'
+      - series: 'dataflow_oldest_queued_seconds{job="dataflow",instance="api:8000"}'
+        values: '301x6 0x3'
+      - series: 'dataflow_outbox_oldest_unpublished_seconds{job="dataflow",instance="api:8000"}'
+        values: '121x6 0x3'
+      - series: 'dataflow_fresh_workers{job="dataflow",instance="api:8000"}'
+        values: '0x6 1x3'
+      - series: 'dataflow_fresh_schedulers{job="dataflow",instance="api:8000"}'
+        values: '0x6 1x3'
+      - series: 'dataflow_telemetry_available{job="dataflow",instance="api:8000"}'
+        values: '1x10'
+      - series: 'dataflow_storage_free_bytes{job="dataflow",instance="api:8000"}'
+        values: '536870911x6 1073741824x3'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: DataFlowMetricsScrapeUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DataFlowQueueDelay
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: DataFlowOutboxDelay
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: DataFlowMetricsScrapeUnavailable
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: critical}
+            exp_annotations:
+              summary: "DataFlow operational metrics cannot be scraped"
+              description: "Check API reachability, metrics enablement, and the separate operator token. Missing application metrics alone cannot signal an outage."
+      - eval_time: 6m
+        alertname: DataFlowQueueDelay
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: warning}
+            exp_annotations:
+              summary: "DataFlow jobs are waiting longer than the example threshold"
+              description: "Inspect worker heartbeats, resource saturation, and job admission. Tune this threshold from measured workloads."
+      - eval_time: 6m
+        alertname: DataFlowOutboxDelay
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: warning}
+            exp_annotations:
+              summary: "Durable work is waiting for broker publication"
+      - eval_time: 6m
+        alertname: DataFlowWorkersMissing
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: critical}
+            exp_annotations:
+              summary: "No fresh worker heartbeat is visible"
+      - eval_time: 6m
+        alertname: DataFlowSchedulerMissing
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: critical}
+            exp_annotations:
+              summary: "No fresh recovery scheduler heartbeat is visible"
+      - eval_time: 6m
+        alertname: DataFlowStorageLow
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: warning}
+            exp_annotations:
+              summary: "Dataset or report storage is below the example free-space floor"
+      - eval_time: 8m
+        alertname: DataFlowMetricsScrapeUnavailable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: DataFlowQueueDelay
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: DataFlowOutboxDelay
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: DataFlowWorkersMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: DataFlowSchedulerMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: DataFlowStorageLow
+        exp_alerts: []
+
+  - name: telemetry outage does not imply missing workers and recovers
+    interval: 1m
+    input_series:
+      - series: 'dataflow_telemetry_available{job="dataflow",instance="api:8000"}'
+        values: '0x2 1x3'
+      - series: 'dataflow_fresh_workers{job="dataflow",instance="api:8000"}'
+        values: '0x2 1x3'
+      - series: 'dataflow_fresh_schedulers{job="dataflow",instance="api:8000"}'
+        values: '0x2 1x3'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: DataFlowTelemetryUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: DataFlowTelemetryUnavailable
+        exp_alerts:
+          - exp_labels: {job: dataflow, instance: "api:8000", severity: warning}
+            exp_annotations:
+              summary: "Process heartbeat storage cannot be read"
+      - eval_time: 2m
+        alertname: DataFlowWorkersMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: DataFlowSchedulerMissing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DataFlowTelemetryUnavailable
+        exp_alerts: []
+
+  - name: healthy metrics at example boundaries do not alert
+    interval: 1m
+    input_series:
+      - series: 'up{job="dataflow",instance="api:8000"}'
+        values: '1x10'
+      - series: 'dataflow_oldest_queued_seconds{job="dataflow",instance="api:8000"}'
+        values: '300x10'
+      - series: 'dataflow_outbox_oldest_unpublished_seconds{job="dataflow",instance="api:8000"}'
+        values: '120x10'
+      - series: 'dataflow_fresh_workers{job="dataflow",instance="api:8000"}'
+        values: '1x10'
+      - series: 'dataflow_fresh_schedulers{job="dataflow",instance="api:8000"}'
+        values: '1x10'
+      - series: 'dataflow_telemetry_available{job="dataflow",instance="api:8000"}'
+        values: '1x10'
+      - series: 'dataflow_storage_free_bytes{job="dataflow",instance="api:8000"}'
+        values: '536870912x10'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 10m
+        exp_samples: []

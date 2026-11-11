@@ -22,7 +22,7 @@ test("guided tour leads into a reversible sample transformation", async ({ page 
   await tour.getByRole("button", { name: "Explore DataFlow", exact: true }).click();
 
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Export current version" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Export preview CSV (up to 100 rows)" })).toBeVisible();
 
   await openSection(page, "Transformations");
   await page.getByRole("button", { name: "Preview impact" }).click();

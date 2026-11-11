@@ -3,6 +3,8 @@
 ## Implemented controls
 
 - Access tokens are short-lived and refresh tokens rotate on every use.
+- Reuse of an unexpired, consumed refresh token revokes its entire session family, including the successor. Logout revokes that family; independent logins remain independent. Rotation and replay are serialized per account. Clients must share one in-flight refresh request. Existing access tokens remain valid until expiration; family revocation prevents renewal.
+- Migration preserves active legacy refresh tokens, assigning each recorded token an independent family. It cannot reconstruct relationships that were never recorded before migration.
 - Refresh sessions are persisted by `jti` and can be revoked at logout.
 - Passwords require at least 10 characters with letters and numbers and are hashed with bcrypt.
 - Authentication and upload attempts are rate-limited through shared Redis counters; upload checks run before multipart parsing.

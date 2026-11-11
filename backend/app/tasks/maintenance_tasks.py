@@ -229,6 +229,8 @@ def remove_orphaned_storage_files(grace_hours: int = 24):
             ):
                 referenced.add(str(Path(transformation.output_path).resolve()))
         for report in reports:
+            if report.status in {"queued", "processing"} and report.snapshot_path:
+                referenced.add(str(Path(report.snapshot_path).resolve()))
             if report.status == "completed" and report.file_path:
                 referenced.add(str(Path(report.file_path).resolve()))
 

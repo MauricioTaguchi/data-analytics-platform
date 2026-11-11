@@ -1,6 +1,6 @@
 # Deployment
 
-This guide describes the included development and portfolio deployment paths. It includes backup/restore tooling and protected operational metrics, but does not provision high availability, backup scheduling, central scraping/alerting or managed disaster recovery. Review [Known limitations](LIMITATIONS.md) before placing important data in any environment.
+This guide describes the included development and portfolio deployment paths. It includes backup/restore tooling, protected operational metrics, and an optional local Prometheus/Alertmanager overlay. It does not provision high availability, backup scheduling, hosted monitoring, external alert delivery, or managed disaster recovery. Review [Known limitations](LIMITATIONS.md) before placing important data in any environment.
 
 ## Local Docker deployment
 
@@ -8,6 +8,8 @@ This guide describes the included development and portfolio deployment paths. It
 2. Replace `SECRET_KEY` with a long random value.
 3. Run `docker compose up --build`.
 4. Confirm `http://localhost:8000/health/live` and `http://localhost:8000/health/ready`, then open `http://localhost:5173`.
+
+To enable local collection and inspect alerts, follow the token-file permissions and startup commands in [Operations: optional local monitoring](OPERATIONS.md#optional-local-monitoring). The overlay is opt-in, keeps its interfaces on `127.0.0.1`, and configures no external recipients. It is not included in the Render blueprint.
 
 ## Render blueprint
 
@@ -26,7 +28,13 @@ The Blueprint waits for linked-branch checks before automatically deploying eith
 
 ## Upgrade and process layout
 
-The current migration head is `20261013_0015`. Stop new admission, drain or cancel outstanding work with the existing release, and stop old API/worker/scheduler processes before applying the migration chain. Back up database and files together first. The schema adds snapshot manifests/guards, operation version binding, quality evidence and job correlation. Older files remain unverified and retention stays disabled by default. Follow [Processing and recovery](PROCESSING_RECOVERY.md); do not run mixed old/new workers against the new schema.
+The current migration head is `20261111_0017`. Back up database and files together first, stop new admission, drain or cancel outstanding work with the existing release, and stop old API/worker/scheduler processes before applying `20261111_0016` and then `20261111_0017` with `alembic upgrade head`. Start all application processes from the matching new revision only after migration succeeds. Do not run mixed old/new workers against the new schema.
+
+Migration `0016` records the exact dataset snapshot and report options captured when a report is requested. Existing generated PDFs keep their historical contents; their unknown input identity is not inferred from the latest dataset. Old queued reports without pinned inputs must be recreated after upgrade: the new worker fails them explicitly instead of rendering potentially different data. Drain these reports with the old release before the maintenance window when their original output is needed.
+
+Migration `0017` adds refresh-session families for replay detection. Existing refresh tokens remain valid, each in an independent legacy family; the migration does not combine sessions from separate devices or force everyone to sign in again. Subsequent rotations retain their family identity.
+
+Earlier migrations add snapshot manifests/guards, operation version binding, quality evidence and job correlation. Older files remain unverified and retention stays disabled by default. Follow [Processing and recovery](PROCESSING_RECOVERY.md).
 
 Compose runs separate bulk and interactive workers. Render's single-container process wrapper explicitly consumes both queues; splitting them on Render requires shared storage and matching queue consumers. Configure supervised execution budgets and aggregate container limits for the available CPUs/RAM. A worker heartbeat does not replace an upload-to-undo smoke test.
 
@@ -38,6 +46,7 @@ Set `OPERATIONS_METRICS_TOKEN` to enable protected processing and Prometheus-for
 
 - Schedule coordinated PostgreSQL/file backups using the provided tooling or platform controls, provision an independent encrypted destination, and run the isolated [restore drill](DISASTER_RECOVERY.md). The optional S3 destination requires a versioned bucket; it does not replace local runtime files.
 - Centralize API, worker, and scheduler logs; configure alerts from measured workload.
+- Run the [HTTP workload](BENCHMARKS.md#http-latency-errors-memory-and-cost-inputs) and representative data journeys on the target infrastructure. Record latency/error budgets, API and worker/container memory, and actual infrastructure prices; the repository does not claim production capacity or cost from synthetic CI evidence.
 - Confirm TLS, secret management, CORS, disk capacity, and private PostgreSQL/Redis network paths.
 - Document the deployed revision and a migration-aware rollback procedure.
 - Run the security checklist in [Security model](SECURITY.md).
