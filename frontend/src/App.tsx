@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import axios from "axios";
 import { checkApiHealth, describeApiError, downloadDataset, type AuthenticationInput } from "./api-client";
 import { exportCsvText } from "./data-utils";
 import { processingState } from "./processing-state";
+import { deleteSavedResource, type DeletionTarget } from "./lifecycle-api";
+import { DeleteResourceDialog } from "./components/DeleteResourceDialog";
 import { WorkspacePicker } from "./components/WorkspacePicker";
 import type { AccountMode } from "./account-utils";
 import { AccountPanel } from "./components/AccountPanel";
@@ -56,6 +59,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [mobileNav, setMobileNav] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(initialResetToken !== null);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [deletionTarget, setDeletionTarget] = useState<DeletionTarget | null>(null);
   const [connectionOptions, setConnectionOptions] = useState<{ mode: AccountMode; email?: string; token?: string }>({ mode: initialResetToken !== null ? "reset" : "login", token: initialResetToken ?? undefined });
   const [tourStep, setTourStep] = useState<number | null>(initialResetToken !== null ? null : 0);
   const tourDialog = useDialogFocus(tourStep !== null, () => setTourStep(null));
@@ -63,7 +67,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const lifecycleOperation = useRef(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const accountButton = useRef<HTMLButtonElement>(null);
+  const workspaceHeading = useRef<HTMLHeadingElement>(null);
   const combinedBusy = busy || lifecycleBusy || auth.busy;
+  const uploadDisabled = combinedBusy || (auth.live && !auth.project);
   const processing = processingState(jobs.jobs, workspace.uploadPhase, workspace.uploadProgress, workspace.workflowStatus);
   const uploadLabel = workspace.uploadPhase === "uploading"
     ? `Uploading ${workspace.uploadProgress}%`
@@ -109,13 +115,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     transformations.reset();
     setBusy(false);
     setAccountOpen(false);
+    setDeletionTarget(null);
     setNotice("Your session expired. Sign in again to reopen your saved work.");
   }, [auth.sessionExpiredAt, jobs.reset, transformations.reset, workspace.reset]);
 
   async function connect(input: AuthenticationInput) {
     const project = await auth.connect(input);
     jobs.reset(); workspace.reset(); transformations.reset();
-    setConnectionOpen(false); setNotice(`Signed in to “${project.name}”. Choose a saved dataset to resume, or upload a new file.`);
+    setConnectionOpen(false); setNotice(project
+      ? `Signed in to “${project.name}”. Choose a saved dataset to resume, or upload a new file.`
+      : "You are signed in with no saved projects. Create a project before uploading a dataset.");
   }
 
   function openSignIn(mode: AccountMode = "login", email?: string) {
@@ -182,6 +191,64 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     } catch (error) { setNotice(describeApiError(error)); }
   }
 
+  async function createWorkspace() {
+    await runLifecycleOperation(async () => {
+      try {
+        const created = await auth.createWorkspace();
+        jobs.reset(); workspace.reset(); transformations.reset();
+        setNotice(`Created “${created.name}”. You can now upload a dataset.`);
+      } catch (error) { setNotice(describeApiError(error)); }
+    });
+  }
+
+  async function refreshWorkspace() {
+    await runLifecycleOperation(async () => {
+      try {
+        const available = await auth.reloadProjects();
+        if (!available.some((item) => item.id === auth.project?.id)) {
+          jobs.reset(); workspace.reset(); transformations.reset();
+        } else {
+          try { await workspace.refresh(); }
+          catch (error) {
+            if (!axios.isAxiosError(error) || error.response?.status !== 404) throw error;
+            jobs.reset(); workspace.reset(); transformations.reset();
+          }
+        }
+        workspace.reloadCatalog();
+        setNotice("Your saved workspace was refreshed. Choose an available dataset or create a project to continue.");
+      } catch (error) { setNotice(describeApiError(error)); }
+    });
+  }
+
+  function closeDeletion() {
+    setDeletionTarget(null);
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body || active.closest('[role="dialog"]') || active.matches(":disabled")) {
+        (auth.live && accountButton.current ? accountButton.current : workspaceHeading.current)?.focus();
+      }
+    });
+  }
+
+  async function deleteResource(confirmation: string, password: string) {
+    if (!deletionTarget) return;
+    const target = deletionTarget;
+    await runLifecycleOperation(async () => {
+      await deleteSavedResource(target, confirmation, password);
+      jobs.reset(); workspace.reset(); transformations.reset();
+      if (target.scope === "account") await auth.disconnect();
+      else if (target.scope === "project") auth.forgetProject(target.id);
+      else workspace.reloadCatalog();
+      setAccountOpen(false);
+      setActiveSection("overview");
+      setNotice(target.scope === "account"
+        ? "Your account is closed and you are signed out. File cleanup is pending; audit records and existing backups follow the operator's retention policy."
+        : `The ${target.scope} was removed from your workspace. File cleanup is pending; audit records and existing backups follow the operator's retention policy.`);
+      setDeletionTarget(null);
+      requestAnimationFrame(() => workspaceHeading.current?.focus());
+    });
+  }
+
   async function openSavedDataset(datasetId: number) {
     setBusy(true);
     jobs.reset();
@@ -196,6 +263,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function upload(file?: File) {
     if (!file) return;
+    if (auth.live && !auth.project) { setNotice("Create a project before uploading a dataset."); return; }
     setBusy(true); jobs.reset(); transformations.reset(); setNotice("Uploading and validating the dataset…");
     try {
       const result = await workspace.upload(file, auth.project?.id || null, jobs.track);
@@ -251,17 +319,18 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       <div className="breadcrumbs">Workspace <span>/</span> <strong>{sectionLabel}</strong></div>
       <div className="topbar-tools">{auth.live ? <button ref={accountButton} className="text-button" disabled={combinedBusy} onClick={() => setAccountOpen(true)}>Account</button> : null}<button className="text-button tour-trigger" onClick={() => setTourStep(0)}>Guided tour</button><button className="icon-button theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`} title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}><WorkspaceIcon name={theme === "dark" ? "sun" : "moon"} /></button></div>
     </header>
-      <section className="dataset-heading"><div><div className="title-line"><h1>{SECTION_COPY[activeSection].title}</h1><span className={auth.live ? "connected" : "connected demo"}><span className="status-dot" />{auth.live ? "Signed in" : "Demo mode"}</span></div><p>{SECTION_COPY[activeSection].subtitle}</p></div>
-        <div className="top-actions"><button className="secondary" disabled={combinedBusy} onClick={() => void restoreSample()}>Use sample</button>{workspace.uploadPhase !== "idle" ? <button className="secondary" onClick={() => void workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options)).then((cancelled) => { if (cancelled) setNotice("Cancelling the active workflow…"); })}>Cancel workflow</button> : null}<label className={`primary file-button${combinedBusy ? " disabled" : ""}`} aria-disabled={combinedBusy}><WorkspaceIcon name="upload" size={17} />{uploadLabel}<input aria-label="Upload dataset file" type="file" accept=".csv,.xlsx,.xls,.json,.parquet" disabled={combinedBusy} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void upload(file); }} /></label></div>
+      <section className="dataset-heading"><div><div className="title-line"><h1 ref={workspaceHeading} tabIndex={-1}>{SECTION_COPY[activeSection].title}</h1><span className={auth.live ? "connected" : "connected demo"}><span className="status-dot" />{auth.live ? "Signed in" : "Demo mode"}</span></div><p>{SECTION_COPY[activeSection].subtitle}</p></div>
+        <div className="top-actions"><button className="secondary" disabled={combinedBusy} onClick={() => void restoreSample()}>Use sample</button>{workspace.uploadPhase !== "idle" ? <button className="secondary" onClick={() => void workspace.cancelUpload((taskId, options) => jobs.cancel(taskId, options)).then((cancelled) => { if (cancelled) setNotice("Cancelling the active workflow…"); })}>Cancel workflow</button> : null}<label className={`primary file-button${uploadDisabled ? " disabled" : ""}`} aria-disabled={uploadDisabled}><WorkspaceIcon name="upload" size={17} />{uploadLabel}<input aria-label="Upload dataset file" type="file" accept=".csv,.xlsx,.xls,.json,.parquet" disabled={uploadDisabled} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void upload(file); }} /></label></div>
       </section>
       <div className="notice" role="status" aria-live="polite"><span aria-hidden="true">i</span>{notice}</div>
-      {auth.live && auth.project ? <WorkspacePicker projects={auth.projects} projectId={auth.project.id} datasets={workspace.datasets} datasetId={workspace.dataset?.id ?? null} loading={workspace.catalogLoading} error={workspace.catalogError} busy={combinedBusy} onProject={selectProject} onDataset={(datasetId) => void openSavedDataset(datasetId)} onRefresh={workspace.reloadCatalog} /> : null}
+      {auth.live ? <WorkspacePicker projects={auth.projects} projectId={auth.project?.id ?? null} datasets={workspace.datasets} datasetId={workspace.dataset?.id ?? null} loading={workspace.catalogLoading} error={workspace.catalogError} busy={combinedBusy} onProject={selectProject} onDataset={(datasetId) => void openSavedDataset(datasetId)} onRefresh={() => void refreshWorkspace()} onCreateProject={() => void createWorkspace()} onDeleteProject={() => { if (auth.project) setDeletionTarget({ scope: "project", id: auth.project.id, name: auth.project.name }); }} onDeleteDataset={() => { if (workspace.dataset) setDeletionTarget({ scope: "dataset", id: workspace.dataset.id, name: workspace.dataset.original_filename }); }} /> : null}
       <section className="dataset-strip" aria-label="Current dataset"><div className="dataset-identity"><span className="dataset-icon"><WorkspaceIcon name="datasets" size={18} /></span><strong title={workspace.datasetName}>{workspace.datasetName}</strong><span className="status-pill">{workspace.dataset ? `Revision ${workspace.dataset.version}` : "Local preview"}</span></div><button className="text-button" onClick={() => setActiveSection(activeSection === "transformations" ? "datasets" : "transformations")}>{activeSection === "transformations" ? "Inspect dataset" : "View transformations"}<WorkspaceIcon name="chevron" size={15} /></button></section>
       {content}
       <footer className="workspace-footer"><div className="footer-summary"><WorkspaceIcon name="datasets" size={20} /><div><strong>{rowCount.toLocaleString("en-US")} {workspace.dataset ? "rows" : "preview rows"} <span>·</span> {columnCount} columns</strong><span>{workspace.dataset ? "Saved in your account" : "Local preview · up to 100 rows · local changes only"}</span></div></div><button className="primary" disabled={combinedBusy || transformations.undoNeedsRecovery} onClick={exportDataset}><WorkspaceIcon name="download" size={17} />{workspace.dataset ? "Export current version" : "Export preview CSV (up to 100 rows)"}</button></footer>
     </main>
     {connectionOpen ? <ConnectionPanel busy={auth.busy} initialMode={connectionOptions.mode} initialEmail={connectionOptions.email} resetToken={connectionOptions.token} onClose={() => { setConnectionOpen(false); setConnectionOptions({ mode: "login" }); if (auth.live) accountButton.current?.focus(); }} onSubmit={connect} onPasswordReset={passwordResetComplete} /> : null}
-    {accountOpen && auth.live ? <AccountPanel busy={combinedBusy} onClose={() => setAccountOpen(false)} onSignOut={disconnect} onResetPassword={(email) => openSignIn("forgot", email)} /> : null}
+    {accountOpen && auth.live ? <AccountPanel busy={combinedBusy} onClose={() => setAccountOpen(false)} onSignOut={disconnect} onResetPassword={(email) => openSignIn("forgot", email)} onDeleteAccount={(profile) => { setAccountOpen(false); setDeletionTarget({ scope: "account", name: profile.email }); }} /> : null}
+    {deletionTarget ? <DeleteResourceDialog target={deletionTarget} onClose={closeDeletion} onDelete={deleteResource} /> : null}
     {tourStep !== null ? <div className="tour-backdrop" role="presentation"><section ref={tourDialog} tabIndex={-1} className="tour-dialog" role="dialog" aria-modal="true" aria-labelledby="tour-title"><span className="tour-progress">{tourStep + 1} of {TOUR_STEPS.length}</span><h2 id="tour-title">{TOUR_STEPS[tourStep].title}</h2><p>{TOUR_STEPS[tourStep].body}</p><div className="tour-dots" aria-hidden="true">{TOUR_STEPS.map((_, index) => <span key={index} className={index === tourStep ? "active" : ""} />)}</div><div className="button-row"><button className="secondary" onClick={() => setTourStep(null)}>Skip tour</button><button className="primary" data-dialog-initial-focus="true" onClick={() => setTourStep(tourStep === TOUR_STEPS.length - 1 ? null : tourStep + 1)}>{tourStep === TOUR_STEPS.length - 1 ? "Explore DataFlow" : "Next"}</button></div></section></div> : null}
   </div>;
 }

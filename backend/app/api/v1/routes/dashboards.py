@@ -4,6 +4,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.chart import Chart
 from app.models.dashboard import Dashboard
+from app.models.dataset import Dataset
 from app.models.project import Project
 from app.models.user import User
 from app.schemas.dashboard import (
@@ -82,7 +83,8 @@ def list_charts(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return db.query(Chart).filter(Chart.dashboard_id == dashboard_id).all()
+    return (db.query(Chart).join(Dataset, Dataset.id == Chart.dataset_id)
+            .filter(Chart.dashboard_id == dashboard_id, Dataset.deleted_at.is_(None)).all())
 
 @router.get("/charts/{chart_id}/data", response_model=ChartDataResponse)
 def chart_data(
@@ -94,7 +96,7 @@ def chart_data(
         db.query(Chart)
         .join(Dashboard, Dashboard.id == Chart.dashboard_id)
         .join(Project, Project.id == Dashboard.project_id)
-        .filter(Chart.id == chart_id, Project.owner_id == user.id)
+        .filter(Chart.id == chart_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
         .first()
     )
     if not chart:

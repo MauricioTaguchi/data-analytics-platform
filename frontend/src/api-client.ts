@@ -294,6 +294,12 @@ export async function listProjects(signal?: AbortSignal) {
   return response.data;
 }
 
+export async function createProject(name: string, signal?: AbortSignal) {
+  const response = await apiClient.post<Project>("/projects", { name, description: "Workspace created from the DataFlow web application." }, { signal });
+  requirePositiveId(response.data.id, "Project ID");
+  return response.data;
+}
+
 export async function getOrCreatePortfolioProjects(signal?: AbortSignal) {
   const projects = await listProjects(signal);
   if (projects.length > 0) return projects;

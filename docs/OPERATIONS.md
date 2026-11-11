@@ -125,6 +125,18 @@ Run the bounded [HTTP workload](BENCHMARKS.md#http-latency-errors-memory-and-cos
 
 ## Common incidents
 
+### Password recovery mail is delayed
+
+Recovery requests and password-change notifications use the `password_reset_deliveries` database outbox. The scheduler runs `deliver-recovery-mail` independently of Celery/Redis task consumption. Keep migrations and the scheduler current; an API-only process does not drain the queue. Each dispatcher call handles at most one due message, with a two-second scheduled interval, five attempts, exponential backoff starting at 30 seconds and a five-minute claim lease. Reset requests expire under `PASSWORD_RESET_EXPIRE_MINUTES`; change notifications expire after 24 hours. Delivery is not exactly once: an interrupted receipt after SMTP acceptance can resend the same single-use reset link.
+
+Inspect only aggregate delivery state/age counts and the scheduler's fixed failure messages. Never paste encrypted payloads, addresses, tokens, full reset URLs or SMTP exception strings into public logs/issues. Payloads are cleared on terminal states; expired requests are swept and terminal delivery history is removed after seven days. An expired or permanently failed request requires a new user request. SMTP acceptance is distinct from actual inbox arrival.
+
+Delivery payload encryption and recipient lookup keys are derived separately from `SECRET_KEY`. Keep that secret outside the repository and in protected configuration. Rotating it invalidates old encrypted queue entries as well as the existing authentication boundary; those entries fail closed, and affected users must request recovery again. This is not an independent key-management or zero-interruption rotation facility.
+
+### A workspace deletion is pending
+
+The UI/API distinguishes accepted logical deletion from physical file cleanup. An account with active jobs receives a conflict response; wait for completion or acknowledged cancellation. After HTTP 202, the scheduler's artifact collector retries the queued file cleanup. Investigate collector failures and storage permissions instead of deleting shared volumes. Account closure removes access immediately, but immutable audit metadata and earlier backups have a separate retention/recovery boundary. See [Data lifecycle](DATA_LIFECYCLE.md).
+
 ### Readiness reports PostgreSQL unavailable
 
 Stop traffic to the instance, confirm the connection string and database reachability, and inspect migration status. Do not bypass readiness or run `create_all` as a recovery shortcut.

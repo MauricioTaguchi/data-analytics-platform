@@ -102,13 +102,14 @@ jobs:
       - name: Lint and type-check frontend
         run: pnpm exec eslint src e2e && pnpm typecheck
       - name: Run frontend tests with coverage
-        run: pnpm exec vitest run src --coverage --coverage.provider=v8 --coverage.include=src/data-utils.ts --coverage.include=src/operation-contracts.ts --coverage.include=src/quality-rules.ts --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=70
+        run: pnpm exec vitest run src --coverage --coverage.provider=v8 --coverage.include=src/data-utils.ts --coverage.include=src/operation-contracts.ts --coverage.include=src/quality-rules.ts --coverage.include=src/lifecycle-api.ts --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=70
       - name: Build production bundle
         run: pnpm build
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
-      - name: Run desktop and mobile end-to-end tests
+      - name: Install Chromium, Firefox and WebKit
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - name: Run desktop, mobile and cross-browser end-to-end tests
         env:
+          PLAYWRIGHT_CROSS_BROWSER: "1"
           PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/dataflow-ui-review/artifacts/ui
         run: pnpm test:e2e
       - name: Upload desktop and mobile UI evidence

@@ -21,22 +21,29 @@ def test_corruption_and_direct_sql_mutations_cannot_restore_or_rewrite_history(r
     assert "integrity verification" in response.json()["detail"]
     assert runtime.rows("SELECT version FROM datasets WHERE id=:id", id=dataset_id)[0]["version"] == 2
     assert len(runtime.rows("SELECT id FROM dataset_events WHERE dataset_id=:id", id=dataset_id)) == 1
-    for query in (
-        "UPDATE dataset_events SET result_json='{}' WHERE dataset_id=:id",
-        "DELETE FROM dataset_events WHERE dataset_id=:id",
-        "TRUNCATE dataset_events",
-        "UPDATE dataset_snapshots SET sha256=repeat('0',64) WHERE dataset_id=:id",
-        "DELETE FROM dataset_snapshots WHERE dataset_id=:id",
-        "TRUNCATE dataset_snapshots CASCADE",
-    ):
-        with pytest.raises(DBAPIError, match="append-only|immutable|retained for audit"):
+    # Administrative DDL requires an exclusive maintenance window. In
+    # particular, CASCADE can acquire locks in a different order from recovery
+    # transactions and deadlock before PostgreSQL reaches the rejection trigger.
+    # Do not accept that unrelated error as proof of immutable history.
+    with runtime.quiescent_application():
+        for query in (
+            "UPDATE dataset_events SET result_json='{}' WHERE dataset_id=:id",
+            "DELETE FROM dataset_events WHERE dataset_id=:id",
+            "TRUNCATE dataset_events",
+            "UPDATE dataset_snapshots SET sha256=repeat('0',64) WHERE dataset_id=:id",
+            "DELETE FROM dataset_snapshots WHERE dataset_id=:id",
+            "TRUNCATE dataset_snapshots CASCADE",
+        ):
+            with pytest.raises(DBAPIError, match="append-only|immutable|retained for audit"):
+                with runtime.database.begin() as connection:
+                    connection.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    connection.execute(text(query), {"id": dataset_id})
+        # Report provenance references add an independent foreign-key barrier.
+        # CASCADE above reaches the immutable trigger rather than bypassing it.
+        with pytest.raises(DBAPIError, match="cannot truncate a table referenced in a foreign key constraint"):
             with runtime.database.begin() as connection:
-                connection.execute(text(query), {"id": dataset_id})
-    # Report provenance references add an independent foreign-key barrier.
-    # CASCADE above reaches the immutable trigger rather than bypassing it.
-    with pytest.raises(DBAPIError, match="cannot truncate a table referenced in a foreign key constraint"):
-        with runtime.database.begin() as connection:
-            connection.execute(text("TRUNCATE dataset_snapshots"))
+                connection.execute(text("SET LOCAL lock_timeout = '5s'"))
+                connection.execute(text("TRUNCATE dataset_snapshots"))
     assert len(runtime.rows("SELECT id FROM dataset_snapshots WHERE dataset_id=:id", id=dataset_id)) == 2
     # Database guards permit exactly the retention metadata used by the API.
     snapshot = runtime.request("PATCH", f"/datasets/{dataset_id}/snapshots/{snapshots[0]['id']}",

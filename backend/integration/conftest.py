@@ -5,7 +5,7 @@ INTEGRATION_REDIS_URL. These tests intentionally do not inherit tests/conftest.p
 or its create_all/reset/eager fixtures. Alembic creates the complete test schema.
 """
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -244,6 +244,30 @@ class Runtime:
     def stop_schedulers(self):
         for index in range(2):
             self.stop(f"scheduler-{index}")
+
+    @contextmanager
+    def quiescent_application(self):
+        """Stop application transactions while checking maintenance-only DDL.
+
+        TRUNCATE CASCADE obtains exclusive locks on multiple related tables.
+        Running it beside recovery/cleanup transactions can deadlock before a
+        rejection trigger executes, which says nothing about the trigger's
+        invariant. Drain already-delivered work and close every application
+        process group; keep PostgreSQL and the migrated schema running. The
+        caller still has to assert the exact expected database rejection.
+        """
+        expected = {"api", "worker", "scheduler-0", "scheduler-1"}
+        assert set(self.processes) == expected, "Quiescence requires a complete running application."
+        self.stop_schedulers()
+        self.barrier()
+        self.stop("worker")
+        self.stop("api")
+        try:
+            yield
+        finally:
+            self.start_api()
+            self.start_worker()
+            self.start_schedulers()
 
     def barrier(self):
         token = uuid4().hex

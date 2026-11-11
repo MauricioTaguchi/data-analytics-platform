@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.telemetry import correlation_id
 
 from app.models.dataset_event import DatasetEvent
+from app.models.dataset import Dataset
+from app.models.project import Project
 from app.models.transformation import Transformation
 from app.services.engines.contracts import MaterializedArtifact
 
@@ -142,9 +144,12 @@ class DatasetAuditService:
 
     @staticmethod
     def archived_job(db: Session, task_id: str, actor_id: int) -> dict | None:
-        event = db.query(DatasetEvent).filter_by(
-            task_id=task_id, actor_id=actor_id, kind="transformation",
-        ).first()
+        event = (db.query(DatasetEvent).join(Dataset, Dataset.id == DatasetEvent.dataset_id)
+                 .join(Project, Project.id == Dataset.project_id).filter(
+                     DatasetEvent.task_id == task_id, DatasetEvent.actor_id == actor_id,
+                     DatasetEvent.kind == "transformation", Dataset.deleted_at.is_(None),
+                     Project.deleted_at.is_(None), Project.owner_id == actor_id,
+                 ).first())
         if event is not None:
             return {
                 "task_id": task_id, "status": "SUCCESS", "progress": 100,
@@ -154,7 +159,12 @@ class DatasetAuditService:
             }
         # Existing installations have no fabricated audit backfill. Preserve
         # their terminal lookup using known facts, without guessing a revision.
-        transformation = db.query(Transformation).filter_by(task_id=task_id, user_id=actor_id).first()
+        transformation = (db.query(Transformation).join(Dataset, Dataset.id == Transformation.dataset_id)
+                          .join(Project, Project.id == Dataset.project_id).filter(
+                              Transformation.task_id == task_id, Transformation.user_id == actor_id,
+                              Dataset.deleted_at.is_(None), Project.deleted_at.is_(None),
+                              Project.owner_id == actor_id,
+                          ).first())
         if transformation is None:
             return None
         if transformation.status in {"completed", "undone"}:

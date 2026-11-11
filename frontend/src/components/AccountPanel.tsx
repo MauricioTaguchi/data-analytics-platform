@@ -4,9 +4,9 @@ import { accountErrorMessage } from "../account-utils";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import "./AccountPanel.css";
 
-type Props = { busy: boolean; onClose: () => void; onSignOut: () => Promise<void>; onResetPassword: (email: string) => void };
+type Props = { busy: boolean; onClose: () => void; onSignOut: () => Promise<void>; onResetPassword: (email: string) => void; onDeleteAccount: (profile: AccountProfile) => void };
 
-export function AccountPanel({ busy, onClose, onSignOut, onResetPassword }: Props) {
+export function AccountPanel({ busy, onClose, onSignOut, onResetPassword, onDeleteAccount }: Props) {
   const [profile, setProfile] = useState<AccountProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -29,6 +29,7 @@ export function AccountPanel({ busy, onClose, onSignOut, onResetPassword }: Prop
         {loading ? <p role="status">Loading your account…</p> : error ? <><p className="account-feedback account-error" role="alert">{error}</p><button className="secondary" onClick={() => setAttempt((value) => value + 1)}>Try again</button></> : profile ? <dl className="account-details"><div><dt>Name</dt><dd>{profile.name}</dd></div><div><dt>Email</dt><dd>{profile.email}</dd></div></dl> : null}
         <p className="account-help">Your projects stay saved when you sign out. On a shared computer, sign out when you're finished.</p>
         <div className="dialog-actions"><button className="secondary" disabled={busy || loading || !profile} onClick={() => { if (profile) onResetPassword(profile.email); }}>Reset password</button><button className="primary" disabled={busy} onClick={() => void onSignOut()}>{busy ? "Signing out…" : "Sign out"}</button></div>
+        <button className="text-button account-link" disabled={busy || loading || !profile} onClick={() => { if (profile) onDeleteAccount(profile); }}>Delete account</button>
       </div>
     </section>
   </div>;

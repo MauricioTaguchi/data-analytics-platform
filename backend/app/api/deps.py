@@ -1,5 +1,7 @@
+from datetime import datetime, timezone
+
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from app.models.user import User
 security = HTTPBearer()
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
@@ -35,7 +38,20 @@ def get_current_user(
             detail="Invalid token.",
         ) from exc
 
-    user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+    # Serialize authenticated mutations with account/project/dataset deletion.
+    # Read-only requests already in flight may finish; subsequent requests see
+    # the tombstones. PostgreSQL uses NO KEY UPDATE, matching job admission.
+    query = db.query(User).filter(User.id == user_id, User.is_active.is_(True))
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if db.get_bind().dialect.name == "sqlite":
+            db.query(User).filter(User.id == user_id).update({User.id: User.id}, synchronize_session=False)
+        else:
+            query = query.with_for_update(key_share=True)
+    user = query.populate_existing().first()
+    # A mutation can wait behind account deletion or another owner mutation.
+    # Do not extend the authorization lifetime while waiting for that lock.
+    if int(payload["exp"]) <= datetime.now(timezone.utc).timestamp():
+        raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
     version = payload.get("ver", 0)

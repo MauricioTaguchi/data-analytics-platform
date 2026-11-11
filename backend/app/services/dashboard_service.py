@@ -27,7 +27,7 @@ class DashboardService:
     def ensure_project(db: Session, project_id: int, owner_id: int) -> Project:
         project = (
             db.query(Project)
-            .filter(Project.id == project_id, Project.owner_id == owner_id)
+            .filter(Project.id == project_id, Project.owner_id == owner_id, Project.deleted_at.is_(None))
             .first()
         )
         if not project:
@@ -39,7 +39,7 @@ class DashboardService:
         dashboard = (
             db.query(Dashboard)
             .join(Project, Project.id == Dashboard.project_id)
-            .filter(Dashboard.id == dashboard_id, Project.owner_id == owner_id)
+            .filter(Dashboard.id == dashboard_id, Project.owner_id == owner_id, Project.deleted_at.is_(None))
             .first()
         )
         if not dashboard:
@@ -62,7 +62,7 @@ class DashboardService:
                 Dataset.id == dataset_id,
                 Dataset.project_id == dashboard.project_id,
                 Dataset.deleted_at.is_(None),
-                Project.owner_id == owner_id,
+                Project.owner_id == owner_id, Project.deleted_at.is_(None),
             )
             .first()
         )

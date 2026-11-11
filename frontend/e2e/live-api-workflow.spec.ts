@@ -13,7 +13,7 @@ async function openSection(page: Page, name: string) {
   await page.getByRole("navigation", { name: "Workspace", exact: true }).getByRole("button", { name, exact: true }).click();
 }
 
-liveTest("authenticated workflow persists transformations and undo before dashboard and PDF report", async ({ page }, testInfo) => {
+liveTest("authenticated workflow persists transformations and undo before reports and confirmed deletion", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   page.setDefaultTimeout(15_000);
   const email = `reviewer-${Date.now()}-${test.info().retry}@example.com`;
@@ -165,7 +165,34 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   await expect(page.getByText("The PDF report is ready to download.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Download" }).first()).toBeEnabled();
 
-  await openMenu(page);
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByText("You're signed out. Your saved projects are safe, and the sample is ready to explore.")).toBeVisible();
+  await page.getByRole("button", { name: "Delete dataset", exact: true }).click();
+  const datasetDeletion = page.getByRole("dialog", { name: "Delete dataset?", exact: true });
+  await datasetDeletion.getByLabel("Type DELETE to confirm", { exact: true }).fill("DELETE");
+  await datasetDeletion.getByRole("button", { name: "Delete dataset", exact: true }).click();
+  await expect(datasetDeletion).toBeHidden();
+  expect((await page.request.get(datasetUrl, { headers })).status()).toBe(404);
+  expect((await page.request.get(`${datasetUrl}/preview`, { headers })).status()).toBe(404);
+  await expect(page.locator(".dataset-strip")).toContainText("sales_sample.csv");
+
+  await page.getByRole("button", { name: "Delete project", exact: true }).click();
+  const projectDeletion = page.getByRole("dialog", { name: "Delete project?", exact: true });
+  await projectDeletion.getByLabel("Type DELETE to confirm", { exact: true }).fill("DELETE");
+  await projectDeletion.getByRole("button", { name: "Delete project", exact: true }).click();
+  await expect(projectDeletion).toBeHidden();
+  expect((await page.request.get(`${apiUrl}/datasets/project/${initialDataset.project_id}`, { headers })).status()).toBe(404);
+
+  await page.getByRole("button", { name: "Account", exact: true }).click();
+  await page.getByRole("dialog", { name: "Your account", exact: true }).getByRole("button", { name: "Delete account", exact: true }).click();
+  const accountDeletion = page.getByRole("dialog", { name: "Delete account?", exact: true });
+  await accountDeletion.getByLabel("Current password", { exact: true }).fill("portfolio12345");
+  await accountDeletion.getByLabel("Type DELETE to confirm", { exact: true }).fill("DELETE");
+  await accountDeletion.getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect(accountDeletion).toBeHidden();
+  await expect(page.locator(".notice")).toContainText("Your account is closed");
+  await expect(page.locator(".dataset-heading")).toContainText("Demo mode");
+  expect((await page.request.get(`${apiUrl}/auth/me`, { headers })).status()).toBe(401);
+  expect((await page.request.post(`${apiUrl}/auth/login`, { data: { email, password: "portfolio12345" } })).status()).toBe(401);
+  const deletionScreenshot = testInfo.outputPath("live-deletion-completed.png");
+  await page.screenshot({ path: deletionScreenshot, fullPage: true });
+  await testInfo.attach("Closed disposable account after dataset and project deletion", { path: deletionScreenshot, contentType: "image/png" });
 });

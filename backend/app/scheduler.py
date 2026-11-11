@@ -186,12 +186,15 @@ def default_actions() -> list[ScheduledAction]:
         remove_expired_refresh_sessions,
         remove_orphaned_storage_files,
     )
+    from app.services.recovery_delivery_service import dispatch_recovery_mail, purge_recovery_delivery_history
     from app.tasks.retention_tasks import remove_expired_job_history
     from app.tasks.snapshot_tasks import expire_dataset_snapshots
 
     return [
         ScheduledAction("reconcile-jobs", reconcile_jobs, interval=10.0, max_runtime=120.0),
         ScheduledAction("dispatch-outbox", dispatch_pending, interval=10.0, max_runtime=180.0),
+        ScheduledAction("deliver-recovery-mail", dispatch_recovery_mail, interval=2.0, max_runtime=300.0),
+        ScheduledAction("cleanup-recovery-mail", purge_recovery_delivery_history, interval=300.0, max_runtime=120.0),
         ScheduledAction("cleanup-storage", remove_orphaned_storage_files.run, interval=3_600.0, max_runtime=1_800.0),
         ScheduledAction("cleanup-sessions", remove_expired_refresh_sessions.run, interval=3_600.0, max_runtime=120.0),
         ScheduledAction("cleanup-history", remove_expired_job_history.run, interval=86_400.0, max_runtime=120.0),

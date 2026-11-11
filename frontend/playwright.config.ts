@@ -6,6 +6,7 @@ export default defineConfig({
   testDir: "./e2e",
   outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || path.join(os.tmpdir(), "dataflow-ui-review", "artifacts", "ui"),
   fullyParallel: true,
+  failOnFlakyTests: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   use: {
@@ -16,6 +17,10 @@ export default defineConfig({
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 1000 } } },
     { name: "mobile", use: { ...devices["Pixel 7"] } },
+    ...(process.env.PLAYWRIGHT_CROSS_BROWSER === "1" ? [
+      { name: "firefox", testMatch: /(?:account-access|workspace-recovery|chart-accessibility|sample-workflow|lifecycle-deletion)\.spec\.ts/, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 1000 } } },
+      { name: "webkit", testMatch: /(?:account-access|workspace-recovery|chart-accessibility|sample-workflow|lifecycle-deletion)\.spec\.ts/, use: { ...devices["Desktop Safari"], viewport: { width: 1440, height: 1000 } } },
+    ] : []),
   ],
   webServer: {
     command: "pnpm build && pnpm preview --host 127.0.0.1 --port 4173",

@@ -8,6 +8,7 @@ from app.models.quality_evaluation import QualityEvaluation
 from app.models.job import JobRecord
 from app.models.project import Project
 from app.models.password_reset import PasswordResetToken
+from app.models.password_reset_delivery import PasswordResetDelivery
 from app.models.report import Report
 from app.models.session import RefreshSession
 from app.models.storage_artifact import StorageArtifact
@@ -26,6 +27,7 @@ __all__ = [
     "JobRecord",
     "Project",
     "PasswordResetToken",
+    "PasswordResetDelivery",
     "RefreshSession",
     "Report",
     "StorageArtifact",

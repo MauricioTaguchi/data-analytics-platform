@@ -1,0 +1,11 @@
+.deletion-body { display: grid; gap: 14px; padding: 18px 22px 22px; }
+.deletion-body p { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.deletion-name { font-weight: 700; }
+.deletion-body .deletion-retention { color: var(--muted); font-size: 12px; }
+.deletion-error { color: var(--danger); background: var(--danger-bg); padding: 12px; border-radius: 8px; }
+.danger-button { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); border-radius: 8px; padding: 10px 16px; min-height: 40px; font-weight: 600; }
+.deletion-dialog :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.deletion-body label { display: grid; gap: 6px; min-width: 0; }
+.deletion-body input { width: 100%; min-width: 0; }
+.deletion-body .dialog-actions { flex-wrap: wrap; }
+@media (max-width: 480px) { .deletion-body { padding: 16px; } .deletion-body .dialog-actions button { min-height: 44px; flex: 1 1 auto; } }

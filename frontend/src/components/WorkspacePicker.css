@@ -5,6 +5,9 @@
 .workspace-picker .field-row { margin: 14px 0 10px; }
 .workspace-picker .field-row label { min-width: 0; }
 .workspace-picker-status[role="alert"] { color: var(--text); }
+.workspace-picker-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.workspace-picker .deletion-actions { margin-top: 12px; }
+.workspace-picker .deletion-actions button { color: var(--danger); min-height: 40px; }
 @media (max-width: 600px) {
   .workspace-picker { padding: 14px; }
   .workspace-picker-heading { align-items: flex-start; flex-wrap: wrap; gap: 10px; }

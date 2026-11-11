@@ -1,4 +1,4 @@
-"""Single-use recovery links; only their digests are persisted."""
+"""Single-use recovery links with encrypted durable mail delivery."""
 
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -6,7 +6,6 @@ from hashlib import sha256
 import hmac
 import logging
 import re
-import secrets
 import smtplib
 import ssl
 from urllib.parse import urlencode
@@ -16,10 +15,13 @@ from sqlalchemy.orm import Session
 from app.core.cache import CacheService
 from app.core.config import settings
 from app.core.security import hash_password
-from app.db.session import SessionLocal
 from app.models.password_reset import PasswordResetToken
+from app.models.password_reset_delivery import PasswordResetDelivery
 from app.models.session import RefreshSession
 from app.models.user import User
+from app.services.recovery_delivery_service import (
+    cancel_account_deliveries, enqueue_password_changed, enqueue_reset_request, recipient_key,
+)
 
 logger = logging.getLogger("dataflow.authentication")
 RESET_REQUEST_MESSAGE = "If an eligible account exists, password reset instructions will be sent."
@@ -66,72 +68,44 @@ def deliver_reset_link(recipient: str, token: str) -> None:
 
 
 def notify_password_changed(recipient: str) -> None:
+    """Send once; the durable dispatcher owns retries and redacted diagnostics."""
+    _send_message(
+        recipient,
+        "Your DataFlow password was changed",
+        "Your DataFlow password was reset. Existing sessions and outstanding recovery links have been invalidated. "
+        "Sign in again with your new password. If you did not make this change, request a new recovery link "
+        "and secure access to your email account.",
+    )
+
+
+def request_password_reset(db: Session, email: str) -> None:
+    """Commit a uniform encrypted request before acknowledging durable admission."""
     if not _delivery_configured():
+        logger.warning("Password recovery delivery is not configured.")
         return
+    key = hmac.new(settings.SECRET_KEY.encode(), email.casefold().encode(), sha256).hexdigest()
+    counter_key = f"password-reset:{key}"
     try:
-        _send_message(
-            recipient,
-            "Your DataFlow password was changed",
-            "Your DataFlow password was reset. Existing sessions and outstanding recovery links have been invalidated. "
-            "Sign in again with your new password. If you did not make this change, request a new recovery link "
-            "and secure access to your email account.",
-        )
-    except Exception:
-        # Provider exceptions can contain recipients, credentials, or message bodies.
-        logger.warning("Password change notification could not be delivered.")
-
-
-def request_password_reset(email: str) -> None:
-    """Run after the HTTP response; do not reveal account lookup/delivery timing."""
-    token_hash: str | None = None
-    try:
-        key = hmac.new(settings.SECRET_KEY.encode(), email.casefold().encode(), sha256).hexdigest()
-        if CacheService.increment(f"password-reset:{key}", settings.PASSWORD_RESET_REQUEST_COOLDOWN_SECONDS) > 1:
-            return
-        if not _delivery_configured():
-            logger.warning("Password recovery delivery is not configured.")
-            return
-        with SessionLocal() as db:
-            user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
-            if user is None:
+        if CacheService.increment(counter_key, settings.PASSWORD_RESET_REQUEST_COOLDOWN_SECONDS) > 1:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.PASSWORD_RESET_REQUEST_COOLDOWN_SECONDS)
+            persisted = db.query(PasswordResetDelivery.id).filter(
+                PasswordResetDelivery.recipient_key == recipient_key(email),
+                PasswordResetDelivery.kind == "reset", PasswordResetDelivery.created_at >= cutoff,
+            ).first()
+            if persisted:
                 return
-            # Share the owner lock with login, refresh, and password confirmation.
-            db.query(User).filter(User.id == user.id).update({User.id: User.id}, synchronize_session=False)
-            db.refresh(user)
-            if not user.is_active:
-                db.rollback()
-                return
-            now = datetime.now(timezone.utc)
-            db.query(PasswordResetToken).filter(
-                PasswordResetToken.user_id == user.id, PasswordResetToken.expires_at <= now,
-            ).delete(synchronize_session=False)
-            token = secrets.token_urlsafe(32)
-            token_hash = sha256(token.encode()).hexdigest()
-            db.add(PasswordResetToken(
-                user_id=user.id, token_hash=token_hash,
-                expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_EXPIRE_MINUTES),
-            ))
-            recipient = user.email
-            db.commit()
-        # No database transaction or account lock is held during SMTP I/O.
-        deliver_reset_link(recipient, token)
-        with SessionLocal() as db:
-            db.query(PasswordResetToken).filter(
-                PasswordResetToken.token_hash == token_hash, PasswordResetToken.used_at.is_(None),
-            ).update({PasswordResetToken.delivered_at: datetime.now(timezone.utc)}, synchronize_session=False)
-            db.commit()
+            # The previous admission failed, or has not committed yet. Never
+            # acknowledge an incremented Redis counter as a durable request.
+            raise RuntimeError("Recovery admission has not completed.")
+        enqueue_reset_request(db, email)
+        db.commit()
     except Exception:
-        if token_hash:
-            try:
-                with SessionLocal() as db:
-                    db.query(PasswordResetToken).filter(PasswordResetToken.token_hash == token_hash).update(
-                        {PasswordResetToken.used_at: datetime.now(timezone.utc)}, synchronize_session=False,
-                    )
-                    db.commit()
-            except Exception:
-                # Undelivered records are unusable even if cleanup cannot commit.
-                pass
-        logger.warning("Password recovery request could not be completed.")
+        db.rollback()
+        try:
+            CacheService.delete(counter_key)
+        except Exception:
+            logger.warning("Recovery admission cooldown could not be released.")
+        raise
 
 
 def confirm_password_reset(db: Session, token: str, new_password: str) -> str:
@@ -162,6 +136,9 @@ def confirm_password_reset(db: Session, token: str, new_password: str) -> str:
     db.query(PasswordResetToken).filter(
         PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None),
     ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+    cancel_account_deliveries(db, user)
+    if _delivery_configured():
+        enqueue_password_changed(db, user)
     recipient = user.email
     db.commit()
     return recipient

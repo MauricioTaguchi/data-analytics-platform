@@ -7,11 +7,12 @@
 - Migration preserves active legacy refresh tokens, assigning each recorded token an independent family. It cannot reconstruct relationships that were never recorded before migration.
 - Refresh sessions are persisted by `jti` and can be revoked at logout.
 - Password recovery uses expiring, single-use random links. Only token digests are stored; SMTP delivery uses verified TLS in production. Reset requests use a uniform response, an account-keyed cooldown, and the shared authentication rate limit. Successful recovery increments an account authentication version and revokes refresh sessions and outstanding recovery links, invalidating already-issued access tokens as well.
-- Recovery mail is delivered after the HTTP response. Delivery is not a durable queue: a process interruption can require a new request. SMTP acceptance does not prove inbox delivery. Configure and test the actual sender, recipient delivery, reset origin, and provider limits before enabling recovery for users.
+- Recovery requests commit an encrypted delivery record before the HTTP response; password-change notifications commit with the password change. The scheduler claims expiring leases and retries delivery within bounded attempt/expiry limits. Tokens are hashed for verification and encrypted while awaiting delivery; terminal payloads are cleared. SMTP acceptance does not prove inbox delivery, and a crash between acceptance and the receipt can resend the same single-use link. Configure and test the actual sender, recipient delivery, reset origin, and provider limits before enabling recovery for users.
 - Passwords require at least 10 characters with letters and numbers and are hashed with bcrypt.
 - Authentication and upload attempts are rate-limited through shared Redis counters; upload checks run before multipart parsing.
 - Rate-limit identities use the client address resolved by the ASGI server, never an independently parsed raw forwarded header. Configure Uvicorn's `FORWARDED_ALLOW_IPS` for the actual trusted proxy peers; the legacy `TRUST_PROXY_HEADERS` setting no longer enables application-level header trust. An unrestricted trust list is inappropriate when clients can reach the server directly or supply unsanitized forwarding headers.
 - Dataset queries join through project ownership and return `404` across tenant boundaries.
+- Destructive workspace operations require typed confirmation, account closure additionally checks the current password, and active jobs prevent deletion. Account closure revokes authentication and pending recovery state. Tombstones and durable file-cleanup requests commit together; retained audit/backup metadata and restore reconciliation are documented in [Data lifecycle](DATA_LIFECYCLE.md).
 - Upload admission rejects oversized declared or streamed request bodies before they can grow an unbounded multipart spool, limits simultaneous receive streams per API process, and prechecks active-job capacity for a cryptographically valid access-token subject before reading the body. Full user authentication still occurs in the route dependency, and the route's locked job creation remains the authoritative race-safe admission.
 - Non-upload POST, PUT, PATCH, and DELETE bodies have a separate configurable limit that checks both `Content-Length` and actual streamed bytes before each chunk reaches FastAPI parsing.
 - Upload validation checks extension, declared MIME type, streamed maximum bytes, XLSX/Parquet expansion metadata, parser validity, text null bytes, maximum rows and columns, and bounded column-name length.
@@ -44,6 +45,8 @@
 - Define backup access, retention, restoration tests, and incident ownership for the selected platform. Run the supplied backup verification/isolated restore procedure before accepting recovery objectives; verify S3 bucket versioning and encryption if using the archive destination.
 
 These controls are production-minded safeguards, not a certification or independent security assessment. See [Known limitations](LIMITATIONS.md).
+
+Use the [human validation packet](VALIDATION_SESSIONS.md) to arrange a bounded local review with an independent person. The packet's gates remain pending until actual observations and retests exist.
 
 ## Review evidence and remaining external checks
 
