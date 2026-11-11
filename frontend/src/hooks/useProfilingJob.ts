@@ -79,7 +79,8 @@ export async function pollJobUntilTerminal({
       await wait(signal, Math.min(POLL_INTERVAL_MS * (2 ** transientFailures), 10_000));
       continue;
     }
-    const normalized = { ...status, progress: Math.max(0, Math.min(100, status.progress)) };
+    signal.throwIfAborted();
+    const normalized = { ...status, progress: Number.isFinite(status.progress) ? Math.max(0, Math.min(100, status.progress)) : 0 };
     onStatus?.(normalized);
     if (isTerminalJobStatus(normalized.status)) {
       if (normalized.status !== "SUCCESS") {
@@ -133,14 +134,14 @@ export function useProfilingJob() {
         label,
         signal: controller.signal,
         onStatus: (status) => {
-          if (mounted.current) {
+          if (mounted.current && controllers.current.get(taskId) === controller && !controller.signal.aborted) {
             setJobs((items) => items.map((item) => item.task_id === taskId ? { ...item, ...status } : item));
           }
         },
       });
     } catch (error) {
       if (controller.signal.aborted) throw new Error(`${label} was cancelled.`);
-      if (mounted.current) {
+      if (mounted.current && controllers.current.get(taskId) === controller) {
         const failure = monitoringFailureStatus(error);
         setJobs((items) => items.map((item) => item.task_id === taskId && !isTerminalJobStatus(item.status) ? {
           ...item,

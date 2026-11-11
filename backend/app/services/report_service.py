@@ -1,6 +1,6 @@
 from io import BufferedRandom
 from pathlib import Path
-from typing import Any, BinaryIO, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -8,8 +8,13 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from app.services.dataset_service import DatasetService
 from app.services.storage_service import storage
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+    from app.models.dataset import Dataset
+    from app.models.project import Project
+    from app.models.report import Report
 
 
 class ProjectView(Protocol):
@@ -74,8 +79,29 @@ def escape_pdf_text(value: object) -> str:
 
 class ReportService:
     @staticmethod
+    def capture_input(db: "Session", *, dataset: "Dataset", project: "Project", task_id: str) -> "Report":
+        """Called under owner/dataset locks, in the job/outbox transaction."""
+        from app.models.report import Report
+        from app.services.snapshot_service import SnapshotService
+
+        manifest = SnapshotService.manifest(db, dataset.id, dataset.stored_path, lock=True)
+        if manifest is not None and manifest.availability != "AVAILABLE":
+            raise ValueError("The dataset snapshot is unavailable for reporting.")
+        return Report(
+            project_id=project.id, dataset_id=dataset.id, task_id=task_id, status="queued",
+            dataset_version=dataset.version, snapshot_path=str(Path(dataset.stored_path).absolute()),
+            snapshot_id=manifest.id if manifest else None,
+            snapshot_version=manifest.version if manifest else None,
+            snapshot_sha256=manifest.sha256 if manifest else None,
+            snapshot_size_bytes=manifest.size_bytes if manifest else None,
+            source_filename=dataset.original_filename, source_project_name=project.name,
+        )
+
+    @staticmethod
     def generate_pdf(project: ProjectView, dataset: DatasetReportView, output_path: Path | BinaryIO) -> None:
-        profile = dataset.profile_json or DatasetService.build_profile(dataset)
+        profile = dataset.profile_json
+        if profile is None:
+            raise ValueError("A supervised profile is required before rendering a report.")
         styles = getSampleStyleSheet()
         destination = output_path if hasattr(output_path, "write") else str(output_path)
         document = SimpleDocTemplate(destination, pagesize=A4)
@@ -84,6 +110,24 @@ class ReportService:
             Paragraph(f"Project: {escape_pdf_text(project.name)}", styles["Heading2"]),
             Paragraph(
                 f"Dataset: {escape_pdf_text(dataset.original_filename)}",
+                styles["Normal"],
+            ),
+            Spacer(1, 12),
+            Paragraph("Source provenance", styles["Heading2"]),
+            Paragraph(
+                f"Dataset revision: {escape_pdf_text(getattr(dataset, 'dataset_version', None) or 'Unknown (legacy source)')}",
+                styles["Normal"],
+            ),
+            Paragraph(
+                f"Snapshot version: {escape_pdf_text(getattr(dataset, 'snapshot_version', None) or 'Not recorded')}",
+                styles["Normal"],
+            ),
+            Paragraph(
+                f"Snapshot ID: {escape_pdf_text(getattr(dataset, 'snapshot_id', None) or 'Not recorded')}",
+                styles["Normal"],
+            ),
+            Paragraph(
+                f"Source SHA-256: {escape_pdf_text(getattr(dataset, 'snapshot_sha256', None) or 'Unverified: no original digest was recorded')}",
                 styles["Normal"],
             ),
             Spacer(1, 12),

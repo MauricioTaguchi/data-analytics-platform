@@ -61,16 +61,12 @@ def test_profile_bounds_correlation_width_and_rejects_oversized_headers(monkeypa
         DatasetService.build_profile(dataset)
 
 
-def test_dataset_preview_bounds_width_and_cell_values(monkeypatch):
-    dataset = SimpleNamespace(stored_path="unused.csv", status="ready")
+def test_dataset_preview_bounds_width_and_cell_values(monkeypatch, tmp_path):
+    path = tmp_path / "preview.csv"
+    pd.DataFrame({"visible": ["abcdefgh"], "hidden": [1]}).to_csv(path, index=False)
+    dataset = SimpleNamespace(stored_path=str(path), status="ready")
     monkeypatch.setattr(settings, "TRANSFORMATION_PREVIEW_MAX_COLUMNS", 1)
     monkeypatch.setattr(settings, "TRANSFORMATION_PREVIEW_MAX_CELL_CHARS", 4)
-    monkeypatch.setattr(
-        DatasetService,
-        "read_dataframe",
-        lambda *_args: pd.DataFrame({"visible": ["abcdefgh"], "hidden": [1]}),
-    )
-
     preview = DatasetService.preview(dataset, page=1, page_size=20)
 
     assert preview["columns"] == ["visible"]

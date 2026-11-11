@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
@@ -34,6 +35,7 @@ from app.services.dataset_audit_service import DatasetAuditService
 from app.services.dataset_service import (
     DatasetExpansionLimitError,
     DatasetService,
+    PreviewCapacityError,
     UserStorageQuotaError,
 )
 from app.services.job_service import (
@@ -44,7 +46,7 @@ from app.services.job_service import (
 )
 from app.services.outbox_service import OutboxService
 from app.services.operations import operation_catalog, validate_operation_capability
-from app.services.engines import EngineCapabilityError
+from app.services.engines import EngineCapabilityError, EngineResourceLimitError
 from app.services.storage_service import (
     StorageCapacityError,
     UploadSizeLimitError,
@@ -295,7 +297,20 @@ def preview_dataset(
     user: User = Depends(get_current_user),
 ):
     try:
-        return DatasetService.preview(owned_dataset(db, dataset_id, user.id), page, page_size)
+        dataset = owned_dataset(db, dataset_id, user.id)
+        source = SimpleNamespace(stored_path=dataset.stored_path, status=dataset.status)
+        # No database transaction/connection is held while a parser runs.
+        db.rollback()
+        return DatasetService.preview(source, page, page_size)
+    except PreviewCapacityError as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
+    except EngineResourceLimitError as exc:
+        raise HTTPException(
+            status_code=503, detail="The dataset preview exceeded its execution budget.",
+            headers={"Retry-After": "1"},
+        ) from exc
+    except DatasetExpansionLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

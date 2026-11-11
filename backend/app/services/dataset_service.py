@@ -1,4 +1,4 @@
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import BufferedRandom, TextIOWrapper
@@ -6,6 +6,8 @@ import math
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from threading import Lock
+from dataclasses import replace
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
@@ -56,6 +58,30 @@ class UserStorageQuotaError(ValueError):
 
 class DatasetExpansionLimitError(ValueError):
     """Raised when binary metadata indicates unsafe decompression expansion."""
+
+
+class PreviewCapacityError(ValueError):
+    """All preview execution slots in this API process are occupied."""
+
+
+_preview_lock = Lock()
+_active_previews = 0
+
+
+@contextmanager
+def _preview_slot():
+    # Admission is deliberately nonblocking: queued HTTP requests must not grow
+    # an unbounded backlog of parsers. Each API process owns its own allowance.
+    global _active_previews
+    with _preview_lock:
+        if _active_previews >= settings.DATASET_PREVIEW_MAX_CONCURRENT:
+            raise PreviewCapacityError("Dataset previews are busy. Please retry shortly.")
+        _active_previews += 1
+    try:
+        yield
+    finally:
+        with _preview_lock:
+            _active_previews -= 1
 
 
 class _CapacityGuardedWriter(BufferedRandom):
@@ -495,9 +521,35 @@ class DatasetService:
         return {"rows": int(dataframe.shape[0]), "columns": int(dataframe.shape[1])}
 
     @classmethod
-    def preview(cls, dataset: Dataset, page: int, page_size: int) -> dict:
+    def preview(cls, dataset: ReadySnapshot, page: int, page_size: int) -> dict:
         cls.ensure_ready(dataset)
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("Preview page must be positive and page size must be between 1 and 100.")
+        from app.services.engines.runner import run_dataset_preview
+
+        policy = replace(
+            ResourcePolicy.configured(),
+            threads=settings.DATASET_PREVIEW_THREADS,
+            memory_limit_bytes=settings.DATASET_PREVIEW_MEMORY_MB * 1024 * 1024,
+            timeout_seconds=settings.DATASET_PREVIEW_TIMEOUT_SECONDS,
+            checkpoint_seconds=0.1,
+            max_spill_bytes=0,
+        )
+        with _preview_slot():
+            return run_dataset_preview(SnapshotRef(Path(dataset.stored_path)), page, page_size, policy)
+
+    @classmethod
+    def _preview_page_in_child(cls, dataset: StoredSnapshot, page: int, page_size: int) -> dict:
+        """Read one presentation page inside the resource-limited subprocess.
+
+        Parquet decodes projected batches only. The original CSV/Excel/JSON
+        formats still require their existing parser's whole-column inference;
+        these parsers are isolated, not advertised as streaming pagination.
+        Their input, row count, execution time and RSS budgets remain enforced.
+        """
         path = Path(dataset.stored_path)
+        if path.stat().st_size > settings.MAX_DATASET_EXPANDED_SIZE_MB * 1024 * 1024:
+            raise DatasetExpansionLimitError("The preview input exceeds its size budget.")
         start = (page - 1) * page_size
         if path.suffix.lower() == ".parquet":
             import pyarrow as pa

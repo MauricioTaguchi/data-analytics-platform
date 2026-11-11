@@ -22,6 +22,7 @@ export const apiClient = axios.create({
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
+let sessionGeneration = 0;
 let refreshState: { token: string; promise: Promise<string> } | null = null;
 const sessionExpiredListeners = new Set<() => void>();
 
@@ -46,6 +47,7 @@ export type Project = {
 
 export type Dataset = {
   id: number;
+  project_id?: number;
   original_filename: string;
   status: string;
   row_count: number | null;
@@ -127,6 +129,11 @@ export type ChartData = {
   labels: Array<string | number>;
   values: Array<string | number | null>;
   rows: DataRow[];
+  total_count?: number | null;
+  returned_count?: number | null;
+  omitted_count?: number;
+  grouped_count?: number;
+  truncated?: boolean;
 };
 
 export type Report = {
@@ -151,6 +158,7 @@ function clearTokens() {
 }
 
 function expireSession() {
+  sessionGeneration += 1;
   clearTokens();
   sessionExpiredListeners.forEach((listener) => listener());
 }
@@ -230,16 +238,22 @@ export async function checkApiHealth() {
   return response.data.status;
 }
 
-export async function authenticate(input: AuthenticationInput) {
+export async function authenticate(input: AuthenticationInput, signal?: AbortSignal) {
+  const generation = ++sessionGeneration;
   const payload = input.intent === "register"
     ? { name: input.name, email: input.email, password: input.password }
     : { email: input.email, password: input.password };
-  const response = await apiClient.post<TokenResponse>(`/auth/${input.intent}`, payload);
+  const response = await apiClient.post<TokenResponse>(`/auth/${input.intent}`, payload, { signal });
+  if (signal?.aborted || generation !== sessionGeneration) {
+    await apiClient.post("/auth/logout", { refresh_token: response.data.refresh_token }).catch(() => undefined);
+    throw new DOMException("Authentication was superseded.", "AbortError");
+  }
   storeTokens(response.data);
   return response.data;
 }
 
 export async function disconnectApi() {
+  sessionGeneration += 1;
   const tokenToRevoke = refreshToken;
   clearTokens();
   if (!tokenToRevoke) return;
@@ -250,14 +264,36 @@ export async function disconnectApi() {
   }
 }
 
-export async function getOrCreatePortfolioProject() {
-  const projects = await apiClient.get<Project[]>("/projects");
-  if (projects.data.length > 0) return projects.data[0];
+export function requirePositiveId(value: number, name = "Identifier") {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe integer.`);
+  return value;
+}
+
+export async function listProjects(signal?: AbortSignal) {
+  const response = await apiClient.get<Project[]>("/projects", { signal });
+  for (const project of response.data) requirePositiveId(project.id, "Project ID");
+  return response.data;
+}
+
+export async function getOrCreatePortfolioProjects(signal?: AbortSignal) {
+  const projects = await listProjects(signal);
+  if (projects.length > 0) return projects;
   const created = await apiClient.post<Project>("/projects", {
     name: "Portfolio workspace",
     description: "Workspace created from the DataFlow web application.",
-  });
-  return created.data;
+  }, { signal });
+  requirePositiveId(created.data.id, "Project ID");
+  return [created.data];
+}
+
+export async function listDatasets(projectId: number, signal?: AbortSignal) {
+  requirePositiveId(projectId, "Project ID");
+  const response = await apiClient.get<Dataset[]>(`/datasets/project/${projectId}`, { signal });
+  for (const dataset of response.data) {
+    requirePositiveId(dataset.id, "Dataset ID");
+    if (dataset.project_id !== undefined && dataset.project_id !== projectId) throw new Error("The API returned a dataset from another project.");
+  }
+  return response.data;
 }
 
 type UploadOptions = {
@@ -267,6 +303,7 @@ type UploadOptions = {
 };
 
 export async function uploadDataset(projectId: number, file: File, options: UploadOptions) {
+  requirePositiveId(projectId, "Project ID");
   const form = new FormData();
   form.append("file", file);
   const response = await apiClient.post<{ dataset_id: number; task_id: string; status: string }>(
@@ -287,11 +324,14 @@ export async function uploadDataset(projectId: number, file: File, options: Uplo
 }
 
 export async function fetchDataset(datasetId: number, signal?: AbortSignal) {
+  requirePositiveId(datasetId, "Dataset ID");
   const response = await apiClient.get<Dataset>(`/datasets/${datasetId}`, { signal });
+  if (response.data.id !== datasetId) throw new Error("The API returned a different dataset than requested.");
   return response.data;
 }
 
 export async function fetchDatasetPreview(datasetId: number, signal?: AbortSignal) {
+  requirePositiveId(datasetId, "Dataset ID");
   const response = await apiClient.get<DatasetPreview>(`/datasets/${datasetId}/preview`, {
     params: { page: 1, page_size: 100 },
     signal,
@@ -300,6 +340,7 @@ export async function fetchDatasetPreview(datasetId: number, signal?: AbortSigna
 }
 
 export async function startDatasetProfile(datasetId: number, taskId: string, signal?: AbortSignal) {
+  requirePositiveId(datasetId, "Dataset ID");
   const response = await apiClient.post<JobStatus>(`/datasets/${datasetId}/profile`, undefined, {
     headers: { "X-Task-ID": taskId },
     signal,
@@ -379,6 +420,8 @@ export async function previewDatasetTransformation(
   taskId: string,
   engine?: string,
 ) {
+  requirePositiveId(datasetId, "Dataset ID");
+  requirePositiveId(expectedVersion, "Dataset revision");
   const response = await apiClient.post<JobStatus>(`/datasets/${datasetId}/transform/preview`, {
     engine,
     operation,
@@ -396,6 +439,8 @@ export async function applyDatasetTransformation(
   taskId: string,
   engine?: string,
 ) {
+  requirePositiveId(datasetId, "Dataset ID");
+  requirePositiveId(expectedVersion, "Dataset revision");
   const response = await apiClient.post<{
     transformation_id: number;
     task_id: string;
@@ -410,11 +455,14 @@ export async function applyDatasetTransformation(
 }
 
 export async function fetchTransformationHistory(datasetId: number, signal?: AbortSignal) {
+  requirePositiveId(datasetId, "Dataset ID");
   const response = await apiClient.get<TransformationResult[]>(`/datasets/${datasetId}/transformations`, { signal });
   return response.data;
 }
 
 export async function undoDatasetTransformation(datasetId: number, expectedVersion: number, idempotencyKey: string) {
+  requirePositiveId(datasetId, "Dataset ID");
+  requirePositiveId(expectedVersion, "Dataset revision");
   const delays = [0, 250, 750];
   let lastError: unknown;
   for (const delayMs of delays) {
@@ -469,6 +517,7 @@ function datasetDownloadFilename(disposition: unknown) {
 }
 
 export async function downloadDataset(datasetId: number) {
+  requirePositiveId(datasetId, "Dataset ID");
   const response = await apiClient.get<Blob>(`/datasets/${datasetId}/export`, { responseType: "blob" });
   return { blob: response.data, filename: datasetDownloadFilename(response.headers["content-disposition"]) };
 }

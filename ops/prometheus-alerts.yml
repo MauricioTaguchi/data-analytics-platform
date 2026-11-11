@@ -2,6 +2,14 @@ groups:
   - name: dataflow-processing
     rules:
       # Starting values for evaluation, not a measured production SLO.
+      - alert: DataFlowMetricsScrapeUnavailable
+        expr: up{job="dataflow"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DataFlow operational metrics cannot be scraped"
+          description: "Check API reachability, metrics enablement, and the separate operator token. Missing application metrics alone cannot signal an outage."
       - alert: DataFlowQueueDelay
         expr: dataflow_oldest_queued_seconds > 300
         for: 5m

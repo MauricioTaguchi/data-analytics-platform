@@ -172,7 +172,9 @@ jobs:
         run: python -m pip install -r requirements.txt && python -m alembic upgrade head
       - name: Start API
         working-directory: backend
-        run: nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/dataflow-api.log 2>&1 &
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/dataflow-api.log 2>&1 &
+          echo $! > /tmp/dataflow-api.pid
       - name: Wait for API readiness
         run: |
           for attempt in {1..30}; do
@@ -183,6 +185,16 @@ jobs:
           done
           cat /tmp/dataflow-api.log
           exit 1
+      - name: Measure readiness endpoint under concurrent requests
+        run: python ops/http_probe.py --url http://127.0.0.1:8000/health/ready --requests 60 --concurrency 4 --pid "$(cat /tmp/dataflow-api.pid)" --revision "$GITHUB_SHA" --output /tmp/dataflow-http-probe.json
+      - name: Upload readiness probe evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: readiness-http-probe
+          path: /tmp/dataflow-http-probe.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Install frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile

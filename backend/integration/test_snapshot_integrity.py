@@ -27,11 +27,17 @@ def test_corruption_and_direct_sql_mutations_cannot_restore_or_rewrite_history(r
         "TRUNCATE dataset_events",
         "UPDATE dataset_snapshots SET sha256=repeat('0',64) WHERE dataset_id=:id",
         "DELETE FROM dataset_snapshots WHERE dataset_id=:id",
-        "TRUNCATE dataset_snapshots",
+        "TRUNCATE dataset_snapshots CASCADE",
     ):
         with pytest.raises(DBAPIError, match="append-only|immutable|retained for audit"):
             with runtime.database.begin() as connection:
                 connection.execute(text(query), {"id": dataset_id})
+    # Report provenance references add an independent foreign-key barrier.
+    # CASCADE above reaches the immutable trigger rather than bypassing it.
+    with pytest.raises(DBAPIError, match="cannot truncate a table referenced in a foreign key constraint"):
+        with runtime.database.begin() as connection:
+            connection.execute(text("TRUNCATE dataset_snapshots"))
+    assert len(runtime.rows("SELECT id FROM dataset_snapshots WHERE dataset_id=:id", id=dataset_id)) == 2
     # Database guards permit exactly the retention metadata used by the API.
     snapshot = runtime.request("PATCH", f"/datasets/{dataset_id}/snapshots/{snapshots[0]['id']}",
                                headers=headers, json={"pinned": True}).json()

@@ -93,7 +93,7 @@ def test_parquet_preview_reads_only_page_groups_and_projected_columns(tmp_path, 
             return self.source.iter_batches(**kwargs)
 
     monkeypatch.setattr(pq, "ParquetFile", ObservedFile)
-    result = DatasetService.preview(snapshot(path), page=2, page_size=4)
+    result = DatasetService._preview_page_in_child(snapshot(path), page=2, page_size=4)
     assert [row["id"] for row in result["rows"]] == [4, 5, 6, 7]
     assert result["total_rows"] == 12
     assert result["total_columns"] == 3

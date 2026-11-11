@@ -94,6 +94,38 @@ liveTest("authenticated workflow persists transformations and undo before dashbo
   expect(download.suggestedFilename()).toBe("processed-sales.parquet");
   expect(await download.failure()).toBeNull();
 
+  // Reload removes in-memory credentials. Reconnect, choose the original project,
+  // and recover the transformed revision without uploading the file again.
+  const archiveResponse = await page.request.post(`${apiUrl}/projects`, { headers, data: { name: "Empty archive" } });
+  expect(archiveResponse.status()).toBe(201);
+  let uploadsAfterReload = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && /\/datasets\/project\/\d+$/.test(request.url())) uploadsAfterReload += 1;
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Skip tour" }).click();
+  await expect(page.locator(".dataset-heading").getByText("Demo mode", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => [...Object.values(localStorage), ...Object.values(sessionStorage)].join(" "))).not.toContain(accessToken);
+  await openMenu(page);
+  await page.getByRole("button", { name: "Connect API" }).click();
+  const connection = page.getByRole("dialog", { name: "Connect to the production workflow" });
+  await connection.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill("portfolio12345");
+  await connection.locator("form").getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(connection).toBeHidden();
+  await expect(page.getByText("This project has no saved datasets yet. Upload a file to get started.")).toBeVisible();
+  await page.getByLabel("Project", { exact: true }).selectOption(String(initialDataset.project_id));
+  const savedDataset = page.getByLabel("Saved dataset", { exact: true });
+  await expect(savedDataset).toBeEnabled();
+  await savedDataset.selectOption(String(datasetId));
+  await expect(page.locator(".dataset-strip")).toContainText(`Revision ${initialDataset.version + 1}`);
+  await expect(page.getByRole("columnheader", { name: /customer_name/ })).toBeVisible();
+  await openSection(page, "Transformations");
+  await expect(page.locator(".timeline")).toContainText("rename column");
+  await expect(page.getByRole("button", { name: "Undo latest transformation" })).toBeEnabled();
+  expect(uploadsAfterReload).toBe(0);
+
   const undoResponsePromise = page.waitForResponse(
     (response) => response.url() === `${datasetUrl}/transformations/undo` && response.request().method() === "POST",
   );

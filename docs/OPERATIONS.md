@@ -48,7 +48,38 @@ Set a separate random `OPERATIONS_METRICS_TOKEN` through the deployment's secret
 - Retained-job and retry counts are gauges and decrease during retention. Durations summarize the last 1,000 retained completions, not lifetime histograms.
 - Heartbeats expire after `OPERATIONS_HEARTBEAT_TTL_SECONDS` (default 30). Telemetry Redis calls have independent short timeouts and failures never stop recovery or data execution.
 
-[Prometheus configuration](../ops/prometheus.example.yml) reads the operator token from a mounted secret file. [Example alerts](../ops/prometheus-alerts.yml) cover queue/outbox lag, missing workers/schedulers, unavailable telemetry, and low storage. Mount the alert file at `/etc/prometheus/dataflow-alerts.yml`; configure Alertmanager and delivery separately. Example thresholds are starting points and are not claimed SLOs. Scrape each API replica to observe its local disk; the deployment must also collect container memory/CPU, HTTP latency/error rates, and database metrics.
+[Prometheus configuration](../ops/prometheus.example.yml) reads the operator token from a mounted secret file. [Example alerts](../ops/prometheus-alerts.yml) cover failed metric scrapes, queue/outbox lag, missing workers/schedulers, unavailable telemetry, and low storage. The scrape alert matters because an unreachable API cannot export its own failure. Example thresholds are starting points and are not claimed SLOs. Scrape each API replica to observe its local disk; the deployment must also collect container memory/CPU, HTTP latency/error rates, and database metrics.
+
+### Optional local monitoring
+
+The [monitoring Compose overlay](../ops/docker-compose.monitoring.yml) starts Prometheus and Alertmanager on the existing application network. It binds their web interfaces to loopback only. Prometheus retains at most seven days or approximately 1 GB of time-series blocks; its total filesystem usage can be higher because the write-ahead log and head data also use disk. Alertmanager has a local review receiver with **no notification destination**. This is a runnable local monitor, not an on-call or hosted monitoring service.
+
+1. Set a random `OPERATIONS_METRICS_TOKEN` in `backend/.env` using your secret manager. Store that **same value**, without quotes or an environment-variable assignment, in a token file outside the checkout. Do not use an application access token.
+2. Protect the containing host directory with mode `0700`. The supplied containers use UID/GID `65534`; Docker Compose file-backed secrets are bind mounts, so their source-file permissions must permit that UID to read the file. One local option is a `0444` token file inside the private `0700` directory. Do not make the containing directory public. Alternatively, arrange owner/group permissions for UID `65534` through your host's secret-management policy. Protect `backend/.env` with mode `0600`.
+3. Export the **absolute path**, then start the overlay from the repository root:
+
+```bash
+export DATAFLOW_METRICS_TOKEN_FILE="$HOME/.config/dataflow/metrics-token"
+docker compose -f docker-compose.yml -f ops/docker-compose.monitoring.yml --profile monitoring config --quiet
+docker compose -f docker-compose.yml -f ops/docker-compose.monitoring.yml --profile monitoring up -d --build
+```
+
+The token file is required; it has no development fallback. Recreate the API after changing its environment token and restart Prometheus after replacing the mounted secret. Neither command prints token values; avoid unfiltered `docker compose config` output because the application environment can contain secrets.
+
+At `http://127.0.0.1:9090/targets`, confirm the `dataflow` target is **UP**. Query `up{job="dataflow"}`, `dataflow_fresh_workers`, and `dataflow_fresh_schedulers`; all should be positive. Confirm the configured Alertmanager appears in Prometheus's Alertmanager status. Active routed alerts appear at `http://127.0.0.1:9093`. The supplied route does not send email, webhooks, or messages.
+
+For an isolated local drill, stop the API for longer than one minute and confirm `DataFlowMetricsScrapeUnavailable` fires; allow the scrape/evaluation interval and Alertmanager's 30-second grouping wait. Restart the API, confirm the target becomes UP and the alert clears. Never use this stop/start drill against an environment serving other users. A stopped Prometheus or Alertmanager cannot notify about itself; production needs an independent monitoring watchdog and an explicitly configured receiver with an owner and escalation policy.
+
+The operational configuration workflow validates both configurations and runs [promtool rule tests](../ops/prometheus-alerts.test.yml). Tests cover sustained failures, pending durations, recovery, threshold boundaries, and suppression of misleading missing-worker alerts during a telemetry outage. They do not prove external delivery. Run the same rule checks locally with the pinned image:
+
+```bash
+docker run --rm --entrypoint promtool -v "$PWD/ops:/work:ro" -w /work \
+  prom/prometheus:v3.13.5 test rules prometheus-alerts.test.yml
+docker run --rm --entrypoint amtool -v "$PWD/ops/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+  prom/alertmanager:v0.35.0 check-config /etc/alertmanager/alertmanager.yml
+```
+
+Configuration semantics follow the upstream [Prometheus rule-test format](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/), [Alertmanager configuration](https://prometheus.io/docs/alerting/latest/configuration/), and [Compose secrets permissions](https://docs.docker.com/reference/compose-file/services/#secrets). Review pinned component releases and resource limits before using the overlay outside a local evaluation.
 
 At minimum, production operators should monitor:
 
@@ -74,6 +105,8 @@ Terminal job and outbox records are retained for 30 days by default and removed 
 7. Create a chart/dashboard and generate/download a PDF report.
 8. Confirm request IDs and task IDs make the relevant API and worker logs identifiable for the test journey.
 9. Remove the temporary data according to the deployment's retention policy.
+
+Run the bounded [HTTP workload](BENCHMARKS.md#http-latency-errors-memory-and-cost-inputs) after readiness and retain its JSON beside the deployed revision. CI applies this probe to the real API and separately runs the live browser journey, non-eager process recovery tests, and PostgreSQL/file restore drill. A fast readiness response is not evidence of upload, report, or transformation capacity.
 
 ## Common incidents
 

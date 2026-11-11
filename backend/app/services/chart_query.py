@@ -45,6 +45,32 @@ class QueryGate:
 query_gate = QueryGate()
 
 
+def bounded_result(labels, values, *, total_count=None, rows=None, omitted_count=0, grouped_count=0):
+    rows = rows or []
+    returned = len(rows) if rows else len(labels)
+    total = returned if total_count is None else total_count
+    return {"labels": labels, "values": values, "rows": rows,
+            "total_count": total, "returned_count": returned,
+            "truncated": total > returned and not grouped_count,
+            "omitted_count": omitted_count, "grouped_count": grouped_count}
+
+
+def pie_result(labels, values):
+    if any(not isinstance(value, (int, float, Decimal)) or not math.isfinite(float(value)) or value < 0 for value in values):
+        raise ValueError("Pie charts require finite, non-negative category values.")
+    total = len(labels)
+    grouped = max(0, total - 19) if total > 20 else 0
+    if grouped:
+        label = "Other categories"
+        while label in labels[:19]:
+            label += " (grouped)"
+        labels = labels[:19] + [label]
+        values = values[:19] + [sum(values[19:])]
+    if values and not math.isfinite(float(sum(values))):
+        raise ValueError("Pie chart total exceeds the numeric range.")
+    return bounded_result(labels, values, total_count=total, grouped_count=grouped)
+
+
 def quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
@@ -111,6 +137,12 @@ def validate_chart(chart, kinds: dict[str, str]) -> None:
         raise ValueError("Invalid X column.")
     if chart.y_column and chart.y_column not in kinds:
         raise ValueError("Invalid Y column.")
+    if chart.chart_type == "scatter":
+        if not chart.y_column or any(kinds[c] not in {"number", "null"} for c in (chart.x_column, chart.y_column)):
+            raise ValueError("Scatter charts require numeric X and Y columns.")
+        return
+    if chart.chart_type == "pie" and chart.y_column and kinds[chart.y_column] not in {"number", "boolean", "null"} and chart.aggregation != "count":
+        raise ValueError("Pie charts require numeric category values.")
     if chart.chart_type == "histogram":
         if kinds[chart.x_column] not in {"number", "null"}:
             raise ValueError("Histograms require a numeric X column.")
@@ -231,11 +263,23 @@ def query_parquet(path: Path, chart) -> dict | None:
         connection.read_parquet(str(path), hive_partitioning=False).create_view("snapshot")
         source = "snapshot" + where
         if chart.chart_type == "table":
+            total = connection.execute(f"SELECT COUNT(*) FROM {source}", parameters).fetchone()[0]
             rows = connection.execute(f"SELECT * FROM {source} LIMIT 100", parameters).fetchall()
-            return {"labels": [], "values": [], "rows": [json_value(dict(zip(schema.names, row, strict=True))) for row in rows]}
+            return bounded_result([], [], total_count=total, rows=[json_value(dict(zip(schema.names, row, strict=True))) for row in rows])
         x = quote_identifier(chart.x_column) if chart.x_column else None
         if x and kinds[chart.x_column] == "number":
             x = f"CASE WHEN isnan({x}) THEN NULL ELSE {x} END"
+        if chart.chart_type == "scatter":
+            y = quote_identifier(chart.y_column)
+            valid = f"isfinite(TRY_CAST({x} AS DOUBLE)) AND isfinite(TRY_CAST({y} AS DOUBLE))"
+            total, valid_count = connection.execute(
+                f"SELECT COUNT(*), COUNT(*) FILTER (WHERE {valid}) FROM {source}", parameters,
+            ).fetchone()
+            pairs = connection.execute(
+                f"SELECT {x}, {y} FROM {source}" + (" AND " if where else " WHERE ") + valid + " LIMIT 100", parameters,
+            ).fetchall()
+            return bounded_result([json_value(a) for a, _ in pairs], [json_value(b) for _, b in pairs],
+                                  total_count=valid_count, omitted_count=total - valid_count)
         if chart.chart_type == "histogram":
             minimum, maximum = connection.execute(f"SELECT MIN({x}), MAX({x}) FROM {source}", parameters).fetchone()
             if minimum is None:
@@ -264,11 +308,37 @@ def query_parquet(path: Path, chart) -> dict | None:
         if chart.chart_type == "kpi":
             result = connection.execute(f"SELECT {expression} FROM {source}", parameters).fetchone()[0]
             return {"labels": [chart.title], "values": [json_value(result)], "rows": []}
-        limit = 20 if chart.chart_type == "pie" else 100
-        rows = connection.execute(
-            f"SELECT {x} AS label, {expression} AS value FROM {source} GROUP BY {x} "
-            f"HAVING {expression} IS NOT NULL ORDER BY {x} ASC NULLS LAST LIMIT {limit}", parameters,
-        ).fetchall()
+        if chart.chart_type == "pie" and aggregation != "count":
+            invalid_count = connection.execute(
+                f"SELECT COUNT(*) FILTER (WHERE {value} IS NOT NULL AND NOT isfinite(TRY_CAST({value} AS DOUBLE))) FROM {source}", parameters,
+            ).fetchone()[0]
+            if invalid_count:
+                raise ValueError("Pie charts require finite, non-negative category values.")
+        grouped_query = (f"SELECT {x} AS label, {expression} AS value FROM {source} GROUP BY {x} "
+                         f"HAVING {expression} IS NOT NULL")
+        grouped_count = 0
+        if chart.chart_type == "pie":
+            total, minimum, maximum, total_value = connection.execute(
+                f"SELECT COUNT(*), MIN(value), MAX(value), SUM(value) FROM ({grouped_query})", parameters,
+            ).fetchone()
+            if total and (minimum < 0 or not all(math.isfinite(float(v)) for v in (minimum, maximum, total_value))):
+                raise ValueError("Pie charts require finite, non-negative category values and total.")
+            limit = 19 if total > 20 else 20
+        else:
+            total = connection.execute(f"SELECT COUNT(*) FROM ({grouped_query})", parameters).fetchone()[0]
+            limit = 100
+        rows = connection.execute(f"{grouped_query} ORDER BY label ASC NULLS LAST LIMIT {limit}", parameters).fetchall()
         # Pandas represents missing group keys as nan (NaT for timestamps).
         labels = [str(label) if label is not None else ("NaT" if kinds[chart.x_column] == "timestamp" else "nan") for label, _ in rows]
-        return {"labels": labels, "values": [json_value(value) for _, value in rows], "rows": []}
+        values = [json_value(value) for _, value in rows]
+        if chart.chart_type == "pie" and total > 20:
+            remaining = connection.execute(
+                f"SELECT SUM(value) FROM ({grouped_query} ORDER BY label ASC NULLS LAST OFFSET 19)", parameters,
+            ).fetchone()[0]
+            label = "Other categories"
+            while label in labels:
+                label += " (grouped)"
+            labels.append(label)
+            values.append(json_value(remaining))
+            grouped_count = total - 19
+        return bounded_result(labels, values, total_count=total, grouped_count=grouped_count)

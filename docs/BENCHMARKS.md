@@ -60,3 +60,43 @@ The small warm-query sample shows that an analytical engine is not automatically
 Keep artifacts attached to the measured revision; compare like-for-like hardware, limits, dependency versions, and fixtures. Do not make CI fail on a single timing fluctuation. Treat an unexpected parity failure as a correctness regression and investigate sustained memory/latency changes over repeated runs. Before changing deployment limits, extend the workload with representative row widths, cardinalities, file formats, fallback paths, transformations, dataset sizes, and end-to-end concurrent users.
 
 The [restore drill](DISASTER_RECOVERY.md#reproducible-restore-drill) records recovery duration separately. Query and transformation measurements do not establish backup RPO or recovery RTO.
+
+## HTTP latency, errors, memory, and cost inputs
+
+The standard-library [HTTP probe](../ops/http_probe.py) complements the analytical benchmark with a bounded GET workload against a running API. From the repository root, after starting the application:
+
+```bash
+python ops/http_probe.py \
+  --url http://127.0.0.1:8000/health/ready \
+  --requests 60 --concurrency 4 \
+  --revision "$(git rev-parse HEAD)" \
+  --output /tmp/dataflow-http-probe.json
+```
+
+For a locally running API process on Linux, add `--pid <api-process-pid>` to record RSS. The PID must exist in the probe's own PID namespace. A container's internal PID is not a host PID; use the host-visible container process PID, or run the probe in the same PID namespace. The full-stack CI job supplies its Uvicorn PID and uploads the JSON even when the probe fails. The analytical benchmark, real worker/scheduler recovery tests, and PostgreSQL/file restore drill remain separate CI jobs; this probe does not replace them.
+
+| Evidence | Meaning and boundary |
+| --- | --- |
+| p50/p95/p99, minimum, maximum, samples | Nearest-rank request latency over all attempts. Successes include reading the response body; HTTP failures stop at headers. Connections are new for each request, and the workload uses fixed concurrency without a target arrival rate. |
+| Status counts, error categories, error rate | Non-2xx responses, redirects, transport/timeouts, truncated bodies, and bodies over 2 MiB fail. No response contents or exception strings enter the report. |
+| Completed requests/second and wall time | Observed throughput of this endpoint and workload, including failed attempts; not maximum sustainable application throughput. |
+| Baseline/observed peak/growth RSS | One local Linux process sampled every 20 ms, including baseline and final samples. Short peaks can be missed; child processes, workers, database, cache, and total container memory are excluded. Without `--pid`, memory is explicitly unmeasured. An unreadable or disappearing requested process fails acceptance. |
+| Revision input and SHA-256 | Operator-provided deployed revision plus a hash of the local backend Python sources and probe. A remote deployment must be independently checked against that revision; local files do not prove which release a remote endpoint runs. |
+| Cost allocation | Optional operator-provided infrastructure cost/hour and currency, allocated by elapsed wall time. This is arithmetic from supplied inputs, not a measured bill or a verified price. No value is assumed by default. |
+
+The default exit status is nonzero for any failed request. Choose a tolerance with `--max-error-rate` (a fraction from 0 to 1) only after defining the workload's acceptance criteria. `--max-p95-ms` optionally enforces an explicit latency budget; CI intentionally has no timing threshold inferred from synthetic samples. The JSON is written before an acceptance failure returns exit code 1.
+
+For authenticated read endpoints, put a short-lived token in an environment variable and pass its **name** with `--token-env DATAFLOW_PROBE_TOKEN`. Do not put tokens in a URL or command-line argument. Redirects are blocked so credentials cannot be forwarded to another destination. Reports retain the target origin/path but omit query values, authorization headers, bodies, and error text; use a non-sensitive fixture path and protect the evidence accordingly. The maximum workload is 10,000 requests, 64 concurrent workers, and a 120-second socket timeout per request; start small and run larger workloads only on an environment you control.
+
+If an operator has verified the allocated infrastructure price, supply it explicitly. For example, these shell variables must contain the operator's values; the command provides no price estimate:
+
+```bash
+python ops/http_probe.py --requests 300 --concurrency 6 \
+  --hourly-cost "$DATAFLOW_ALLOCATED_HOURLY_COST" \
+  --currency "$DATAFLOW_COST_CURRENCY" \
+  --output /tmp/dataflow-http-cost-inputs.json
+```
+
+Allocated workload cost is `hourly_cost × wall_seconds / 3600`; cost per successful request divides that value by successful requests and is null when none succeed. Decide explicitly whether the input includes API, workers, database, cache, storage, monitoring and idle capacity. Variable egress, storage growth and provider minimum charges need separate accounting. A readiness-path allocation is not the cost of processing a dataset.
+
+Before claiming a production budget or capacity, repeat representative upload → profile → transform → preview → report journeys at increasing concurrency with known fixture sizes, collect whole-service memory/CPU and storage metrics, retain failed-request details in secured logs, and record the actual deployment limits and provider charges. No production latency, cost, notification delivery, or recovery objective is established by the new local/CI checks.

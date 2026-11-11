@@ -74,10 +74,10 @@ The console groups data preparation, delivery, and operations in one responsive 
 | Workspace | What you can do |
 | --- | --- |
 | **Overview** | Review the active dataset, quality indicators, and recent work. |
-| **Datasets** | Upload CSV, Excel, JSON, or Parquet; inspect records, snapshot history, and quality contracts. |
+| **Datasets** | Upload CSV, Excel, JSON, or Parquet; reopen persisted projects/datasets after login; inspect records, snapshot history, and quality contracts. |
 | **Transformations** | Preview an operation, apply it against an expected version, inspect lineage, and undo completed changes. |
 | **Dashboards** | Build persisted charts and interactive dashboards from your datasets. |
-| **Reports** | Generate PDF data-quality reports and download completed outputs. |
+| **Reports** | Generate PDF data-quality reports bound to the dataset revision at request time, with recorded source provenance. |
 | **Monitoring** | Inspect processing status, progress, and operational feedback. |
 
 ### A complete data workflow
@@ -90,6 +90,8 @@ The console groups data preparation, delivery, and operations in one responsive 
 6. **Share:** build a dashboard, export the current dataset, or generate a PDF quality report.
 
 New transformation outputs use Parquet to preserve column types. Original uploads retain their bytes. New snapshots capture their digest at creation; undo checks it before restoration. History retention is disabled by default and preserves active, recent, pinned, and in-flight snapshots when enabled. Parquet previews project columns and row groups; eligible charts aggregate directly through DuckDB with strict filters and a bounded revision-aware cache.
+
+Scatter charts retain the original numeric X/Y pairs; display limits and omitted invalid pairs are explicit. Pie charts preserve the complete sum of category contributions by grouping the remaining categories. Local CSV export escapes commas, quotes and line breaks and is labelled as a preview export. API preview parsing runs in a supervised child process with its own concurrency, memory, time and result-size budgets.
 
 ## Engineering with evidence
 
