@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { deletionErrorMessage, type DeletionTarget } from "../lifecycle-api";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import "./DeleteResourceDialog.css";
@@ -18,6 +18,11 @@ export function DeleteResourceDialog({ target, onClose, onDelete }: Props) {
   const pending = useRef(false);
   const dialog = useDialogFocus(true, () => { if (!pending.current) onClose(); });
 
+  useEffect(() => {
+    // Focus after React commits the alert and re-enables the dialog controls.
+    if (error && !submitting) errorRef.current?.focus();
+  }, [error, submitting]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending.current || confirmation !== "DELETE" || (target.scope === "account" && !password)) return;
@@ -29,7 +34,6 @@ export function DeleteResourceDialog({ target, onClose, onDelete }: Props) {
       setError(deletionErrorMessage(failure, target.scope));
       // Do not keep the password around after a rejected or uncertain request.
       setPassword("");
-      requestAnimationFrame(() => errorRef.current?.focus());
     } finally {
       pending.current = false;
       setSubmitting(false);

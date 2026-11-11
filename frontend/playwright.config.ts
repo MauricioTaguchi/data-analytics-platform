@@ -6,6 +6,7 @@ export default defineConfig({
   testDir: "./e2e",
   outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || path.join(os.tmpdir(), "dataflow-ui-review", "artifacts", "ui"),
   fullyParallel: true,
+  failOnFlakyTests: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   use: {

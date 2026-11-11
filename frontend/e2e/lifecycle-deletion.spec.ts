@@ -92,6 +92,11 @@ test("active jobs block deletion and a successful retry clears the selected data
   await expect(dialog.getByRole("alert")).toContainText("Cancellation must finish");
   await expect(dialog.getByRole("alert")).toBeFocused();
   await expect(page.locator(".dataset-strip")).toContainText("orders.csv");
+  // A repeated rejection with the same message must restore alert focus too.
+  await dialog.getByRole("button", { name: "Delete dataset", exact: true }).click();
+  await expect.poll(() => state.deletions).toBe(2);
+  await expect(dialog.getByRole("alert")).toContainText("Cancellation must finish");
+  await expect(dialog.getByRole("alert")).toBeFocused();
   await page.screenshot({ path: testInfo.outputPath("deletion-active-job-error.png"), fullPage: true });
   blocked = false;
   await dialog.getByRole("button", { name: "Delete dataset", exact: true }).click();
@@ -101,7 +106,7 @@ test("active jobs block deletion and a successful retry clears the selected data
   await expect(page.getByRole("button", { name: "Delete dataset", exact: true })).toBeDisabled();
   await expect(page.locator(".notice")).toContainText("File cleanup is pending");
   await expect(page.getByRole("heading", { name: "Analytics overview", exact: true })).toBeFocused();
-  expect(state.deletions).toBe(2);
+  expect(state.deletions).toBe(3);
 });
 
 test("deleting the last project keeps the account signed in without recreating data automatically", async ({ page }, testInfo) => {
