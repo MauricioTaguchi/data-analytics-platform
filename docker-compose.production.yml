@@ -141,7 +141,7 @@ services:
       start_period: 10s
 
   proxy:
-    image: nginx:1.29-alpine
+    image: nginx:1.31-alpine
     restart: unless-stopped
     environment:
       DATAFLOW_PUBLIC_HOST: ${DATAFLOW_PUBLIC_HOST:?Set the verified application hostname}
