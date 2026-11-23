@@ -21,7 +21,7 @@ x-runtime: &runtime
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:19-alpine
     restart: unless-stopped
     env_file: ["${DATAFLOW_CONFIG_DIR:?}/db.env"]
     volumes: [postgres_data:/var/lib/postgresql/data]
